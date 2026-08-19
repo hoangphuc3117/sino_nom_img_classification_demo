@@ -1,6 +1,9 @@
 streamlit==1.50.0
 kagglehub==0.3.13
-torch==2.13.0
-torchvision==0.28.0
-numpy==2.5.2
-pillow==12.3.0
+torch==2.13.0; python_version >= "3.14"
+torchvision==0.28.0; python_version >= "3.14"
+numpy==2.5.2; python_version >= "3.14"
+torch==2.2.2; python_version < "3.14"
+torchvision==0.17.2; python_version < "3.14"
+numpy==1.26.4; python_version < "3.14"
+pillow==11.3.0
