@@ -69,12 +69,11 @@ def _find_checkpoint(root, preferred_name):
 
 
 def _resolve_checkpoint(model_name):
-
+    local = _local_checkpoint(model_name)
     try:
         kaggle_root = _download_kaggle_model(model_name)
         return _find_checkpoint(kaggle_root, local.name)
     except Exception:
-        local = _local_checkpoint(model_name)
         if local.exists():
             return local
         raise
