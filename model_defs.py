@@ -20,6 +20,64 @@ CKPTS = {
     "EfficientNet-B4 hierarchical": MODELS_DIR / "best_hierarchical_b4.pth",
     "EfficientNet-B4 flat": MODELS_DIR / "best_accuracy_b4_modified.pth",
 }
+KAGGLE_MODEL_IDS = {
+    "ResNet50+CBAM": "phuchoangnguyen/sinonomimg-resnet50-hier/pyTorch/default",
+    "EfficientNet-B4 hierarchical": "phuchoangnguyen/sinonomimg-eb4-hier/pyTorch/default",
+    "EfficientNet-B4 flat": "phuchoangnguyen/sinonomimg-eb4-flat/pyTorch/default",
+}
+
+def _local_checkpoint(name):
+    return CKPTS[name]
+
+
+@lru_cache(maxsize=None)
+def _download_kaggle_model(model_name):
+    try:
+        import kagglehub
+    except ImportError as exc:
+        raise RuntimeError(
+            "Thiếu package kagglehub. Hãy cài kagglehub để tải model từ Kaggle."
+        ) from exc
+
+    return Path(kagglehub.model_download(KAGGLE_MODEL_IDS[model_name]))
+
+
+def _find_checkpoint(root, preferred_name):
+    preferred = root / preferred_name
+    if preferred.exists():
+        return preferred
+
+    matches = [p for p in root.rglob(preferred_name) if p.is_file()]
+    if matches:
+        return matches[0]
+
+    stem_tokens = [token for token in Path(preferred_name).stem.lower().split("_") if len(token) > 2]
+    if stem_tokens:
+        token_matches = [
+            p for p in root.rglob("*.pth") if all(token in p.name.lower() for token in stem_tokens)
+        ]
+        if token_matches:
+            return token_matches[0]
+
+    pth_files = [p for p in root.rglob("*.pth") if p.is_file()]
+    if len(pth_files) == 1:
+        return pth_files[0]
+    if pth_files:
+        return sorted(pth_files)[0]
+
+    raise FileNotFoundError(f"Không tìm thấy checkpoint .pth trong {root}")
+
+
+def _resolve_checkpoint(model_name):
+    local = _local_checkpoint(model_name)
+
+    try:
+        kaggle_root = _download_kaggle_model(model_name)
+        return _find_checkpoint(kaggle_root, local.name)
+    except Exception:
+        if local.exists():
+            return local
+        raise
 
 MAIN_CATEGORIES = {"SinoNom": 0, "NonSinoNom": 1}
 DOC_TYPES = {"general": 0, "admin": 1, "scene": 2, "epitaph": 3}
@@ -223,19 +281,19 @@ def load_models():
     """Trả về dict {tên: (model, kind)} — kind: 'hier224' | 'hier380' | 'flat380'.
     Checkpoint thiếu sẽ bị bỏ qua."""
     models = {}
-    p = CKPTS["ResNet50+CBAM"]
+    p = _resolve_checkpoint("ResNet50+CBAM")
     if p.exists():
         m = HierarchicalResNet50()
         m.load_state_dict(torch.load(p, map_location="cpu", weights_only=False)["model_state_dict"])
         m.eval().to(DEVICE)
         models["ResNet50+CBAM"] = (m, "hier224")
-    p = CKPTS["EfficientNet-B4 hierarchical"]
+    p = _resolve_checkpoint("EfficientNet-B4 hierarchical")
     if p.exists():
         m = HierarchicalEfficientNetB4()
         m.load_state_dict(torch.load(p, map_location="cpu", weights_only=False)["model_state_dict"])
         m.eval().to(DEVICE)
         models["EfficientNet-B4 hierarchical"] = (m, "hier380")
-    p = CKPTS["EfficientNet-B4 flat"]
+    p = _resolve_checkpoint("EfficientNet-B4 flat")
     if p.exists():
         sd = torch.load(p, map_location="cpu", weights_only=False)
         if isinstance(sd, dict) and "model_state_dict" in sd:
