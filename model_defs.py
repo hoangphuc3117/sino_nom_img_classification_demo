@@ -3,7 +3,7 @@ Tách khỏi app.py để test được không cần Streamlit."""
 import os
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 from pathlib import Path
-
+from functools import lru_cache
 import numpy as np
 import torch
 import torch.nn as nn
