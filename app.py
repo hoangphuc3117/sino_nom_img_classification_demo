@@ -5,7 +5,7 @@ import streamlit as st
 from PIL import Image
 
 from model_defs import (load_models, predict_all, decode, DEVICE,
-                        L1_NAMES, L2_NAMES, L3_NAMES, KAGGLE_MODEL_IDS)
+                        L1_NAMES, L2_NAMES, L3_NAMES, CKPTS)
 
 st.set_page_config(page_title="Hán Nôm Classifier", page_icon="🏮", layout="wide")
 
@@ -22,11 +22,10 @@ models = get_models()
 
 with st.sidebar:
     st.header("Model")
-    st.caption("Model sẽ được tải tự động từ KaggleHub ở lần chạy đầu tiên và cache cục bộ cho các lần sau.")
-    for name, kaggle_id in KAGGLE_MODEL_IDS.items():
+    for name, p in CKPTS.items():
         ok = name in models
         st.markdown(f"{'✅' if ok else '❌'} **{name}**")
-        st.caption(kaggle_id)
+        st.caption(str(p.relative_to(p.parents[2])) if len(p.parents) > 2 else str(p))
     if len(models) >= 2:
         st.markdown("**Ensemble** = trung bình softmax; thời gian ensemble = tổng thời gian thành viên")
     st.divider()

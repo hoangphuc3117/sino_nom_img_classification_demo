@@ -3,7 +3,6 @@ Tách khỏi app.py để test được không cần Streamlit."""
 import os
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 from pathlib import Path
-from functools import lru_cache
 
 import numpy as np
 import torch
@@ -14,72 +13,13 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parent.parent  # thư mục dự án (cha của web_demo/)
 
-# Đường dẫn checkpoint local (fallback) và nguồn tải KaggleHub.
+# Đường dẫn checkpoint (bộ triển khai slim)
 MODELS_DIR = Path(__file__).resolve().parent / "models"   # web_demo/models/
 CKPTS = {
     "ResNet50+CBAM": MODELS_DIR / "best_hierarchical_model_slim.pth",
     "EfficientNet-B4 hierarchical": MODELS_DIR / "best_hierarchical_b4.pth",
     "EfficientNet-B4 flat": MODELS_DIR / "best_accuracy_b4_modified.pth",
 }
-KAGGLE_MODEL_IDS = {
-    "ResNet50+CBAM": "phuchoangnguyen/sinonomimg-resnet50-hier/pyTorch/default",
-    "EfficientNet-B4 hierarchical": "phuchoangnguyen/sinonomimg-eb4-hier/pyTorch/default",
-    "EfficientNet-B4 flat": "phuchoangnguyen/sinonomimg-eb4-flat/pyTorch/default",
-}
-
-
-def _local_checkpoint(name):
-    return CKPTS[name]
-
-
-@lru_cache(maxsize=None)
-def _download_kaggle_model(model_name):
-    try:
-        import kagglehub
-    except ImportError as exc:
-        raise RuntimeError(
-            "Thiếu package kagglehub. Hãy cài kagglehub để tải model từ Kaggle."
-        ) from exc
-
-    return Path(kagglehub.model_download(KAGGLE_MODEL_IDS[model_name]))
-
-
-def _find_checkpoint(root, preferred_name):
-    preferred = root / preferred_name
-    if preferred.exists():
-        return preferred
-
-    matches = [p for p in root.rglob(preferred_name) if p.is_file()]
-    if matches:
-        return matches[0]
-
-    stem_tokens = [token for token in Path(preferred_name).stem.lower().split("_") if len(token) > 2]
-    if stem_tokens:
-        token_matches = [
-            p for p in root.rglob("*.pth") if all(token in p.name.lower() for token in stem_tokens)
-        ]
-        if token_matches:
-            return token_matches[0]
-
-    pth_files = [p for p in root.rglob("*.pth") if p.is_file()]
-    if len(pth_files) == 1:
-        return pth_files[0]
-    if pth_files:
-        return sorted(pth_files)[0]
-
-    raise FileNotFoundError(f"Không tìm thấy checkpoint .pth trong {root}")
-
-
-def _resolve_checkpoint(model_name):
-    local = _local_checkpoint(model_name)
-
-    try:
-        kaggle_root = _download_kaggle_model(model_name)
-        return _find_checkpoint(kaggle_root, local.name)
-    except Exception:
-        if local.exists():
-            return local
-        raise
 
 MAIN_CATEGORIES = {"SinoNom": 0, "NonSinoNom": 1}
 DOC_TYPES = {"general": 0, "admin": 1, "scene": 2, "epitaph": 3}
@@ -101,6 +41,17 @@ FLAT_TFM = T.Compose([T.Resize((380, 380), antialias=True), T.ToTensor(),
                       T.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
 
 
+def cap_long_side(image, max_side=512):
+    """Chuẩn hoá độ phân giải làm việc: thu nhỏ về cạnh dài tối đa max_side
+    (giữ tỉ lệ, không phóng to ảnh nhỏ hơn). Phải khớp với pipeline train."""
+    w, h = image.size
+    m = max(w, h)
+    if m <= max_side:
+        return image
+    scale = max_side / m
+    return image.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.BILINEAR)
+
+
 def letterbox_resize(image, size, fill=(255, 255, 255)):
     w, h = image.size
     side = max(w, h)
@@ -115,10 +66,11 @@ def to_rgb(image):
     if image.mode == 'RGBA':
         bg = Image.new('RGB', image.size, (255, 255, 255))
         bg.paste(image, mask=image.split()[-1])
-        return bg
-    if image.mode != 'RGB':
-        return image.convert('RGB')
-    return image
+        image = bg
+    elif image.mode != 'RGB':
+        image = image.convert('RGB')
+    # Luôn chuẩn hoá độ phân giải làm việc trước khi vào model (23/08)
+    return cap_long_side(image)
 
 
 # ==================== KIẾN TRÚC ====================
@@ -271,19 +223,19 @@ def load_models():
     """Trả về dict {tên: (model, kind)} — kind: 'hier224' | 'hier380' | 'flat380'.
     Checkpoint thiếu sẽ bị bỏ qua."""
     models = {}
-    p = _resolve_checkpoint("ResNet50+CBAM")
+    p = CKPTS["ResNet50+CBAM"]
     if p.exists():
         m = HierarchicalResNet50()
         m.load_state_dict(torch.load(p, map_location="cpu", weights_only=False)["model_state_dict"])
         m.eval().to(DEVICE)
         models["ResNet50+CBAM"] = (m, "hier224")
-    p = _resolve_checkpoint("EfficientNet-B4 hierarchical")
+    p = CKPTS["EfficientNet-B4 hierarchical"]
     if p.exists():
         m = HierarchicalEfficientNetB4()
         m.load_state_dict(torch.load(p, map_location="cpu", weights_only=False)["model_state_dict"])
         m.eval().to(DEVICE)
         models["EfficientNet-B4 hierarchical"] = (m, "hier380")
-    p = _resolve_checkpoint("EfficientNet-B4 flat")
+    p = CKPTS["EfficientNet-B4 flat"]
     if p.exists():
         sd = torch.load(p, map_location="cpu", weights_only=False)
         if isinstance(sd, dict) and "model_state_dict" in sd:
