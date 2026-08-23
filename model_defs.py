@@ -4,6 +4,7 @@ import os
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 from pathlib import Path
 from functools import lru_cache
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -20,6 +21,7 @@ CKPTS = {
     "EfficientNet-B4 hierarchical": MODELS_DIR / "best_hierarchical_b4.pth",
     "EfficientNet-B4 flat": MODELS_DIR / "best_accuracy_b4_modified.pth",
 }
+
 KAGGLE_MODEL_IDS = {
     "ResNet50+CBAM": "phuchoangnguyen/sinonomimg-resnet50-hier/pyTorch/default",
     "EfficientNet-B4 hierarchical": "phuchoangnguyen/sinonomimg-eb4-hier/pyTorch/default",
@@ -308,6 +310,10 @@ def load_models():
 # ==================== DỰ ĐOÁN ====================
 def _flat_to_hier(p6):
     """[non_sino, admin, epitaph, scene, horizontal, vertical] -> (s1, s2, s3)"""
+    # De-smoothing: đảo ngược label_smoothing=0.05 lúc train B4 flat — trả trần tự tin
+    # từ ~0.958 về ~1.0 để ngang thang với model hierarchical khi ensemble (23/08)
+    p6 = np.clip(p6 - 0.05 / 6, 0.0, None)
+    p6 = p6 / max(1e-9, p6.sum())
     s1 = np.array([1.0 - p6[0], p6[0]])
     s2 = np.array([p6[4] + p6[5], p6[1], p6[3], p6[2]])
     s2 = s2 / max(1e-9, s2.sum())
