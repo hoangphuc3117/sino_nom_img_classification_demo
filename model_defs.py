@@ -1,4 +1,6 @@
-"""Định nghĩa 3 model + tiền xử lý + hàm dự đoán cho web demo.
+"""Định nghĩa 2 model (EfficientNet-B4 hierarchical + EfficientNet-B4 flat),
+tiền xử lý và hàm dự đoán cho web demo.
+Đồng bộ y nguyên với han-nom-classification_cp/src/services/sino_classification_service.py.
 Tách khỏi app.py để test được không cần Streamlit."""
 import os
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
@@ -16,16 +18,18 @@ ROOT = Path(__file__).resolve().parent.parent  # thư mục dự án (cha của 
 
 # Đường dẫn checkpoint (bộ triển khai slim)
 MODELS_DIR = Path(__file__).resolve().parent / "models"   # web_demo/models/
+B4_HIER = "EfficientNet-B4 hierarchical"
+B4_FLAT = "EfficientNet-B4 flat"
+ENSEMBLE = "⭐ Ensemble B4 hier + B4 flat"
+
 CKPTS = {
-    "ResNet50+CBAM": MODELS_DIR / "best_hierarchical_model_slim.pth",
-    "EfficientNet-B4 hierarchical": MODELS_DIR / "best_hierarchical_b4.pth",
-    "EfficientNet-B4 flat": MODELS_DIR / "best_accuracy_b4_modified.pth",
+    B4_HIER: MODELS_DIR / "best_hierarchical_b4.pth",
+    B4_FLAT: MODELS_DIR / "best_accuracy_b4_modified.pth",
 }
 
 KAGGLE_MODEL_IDS = {
-    "ResNet50+CBAM": "phuchoangnguyen/sinonomimg-resnet50-hier/pyTorch/default",
-    "EfficientNet-B4 hierarchical": "phuchoangnguyen/sinonomimg-eb4-hier/pyTorch/default",
-    "EfficientNet-B4 flat": "phuchoangnguyen/sinonomimg-eb4-flat/pyTorch/default",
+    B4_HIER: "phuchoangnguyen/sinonomimg-eb4-hier/pyTorch/default",
+    B4_FLAT: "phuchoangnguyen/sinonomimg-eb4-flat/pyTorch/default",
 }
 
 def _local_checkpoint(name):
@@ -72,13 +76,10 @@ def _find_checkpoint(root, preferred_name):
 
 def _resolve_checkpoint(model_name):
     local = _local_checkpoint(model_name)
-    try:
-        kaggle_root = _download_kaggle_model(model_name)
-        return _find_checkpoint(kaggle_root, local.name)
-    except Exception:
-        if local.exists():
-            return local
-        raise
+    if local.exists():
+        return local
+    kaggle_root = _download_kaggle_model(model_name)
+    return _find_checkpoint(kaggle_root, local.name)
 
 MAIN_CATEGORIES = {"SinoNom": 0, "NonSinoNom": 1}
 DOC_TYPES = {"general": 0, "admin": 1, "scene": 2, "epitaph": 3}
@@ -133,129 +134,9 @@ def to_rgb(image):
 
 
 # ==================== KIẾN TRÚC ====================
-class ChannelAttention(nn.Module):
-    def __init__(self, channel_in, reduction_ratio=16, pool_types=('avg', 'max')):
-        super().__init__()
-        self.pool_types = pool_types
-        self.shared_mlp = nn.Sequential(
-            nn.Flatten(), nn.Linear(channel_in, channel_in // reduction_ratio),
-            nn.ReLU(inplace=True), nn.Linear(channel_in // reduction_ratio, channel_in))
-
-    def forward(self, x):
-        atts = []
-        for pt in self.pool_types:
-            if pt == 'avg':
-                p = nn.AvgPool2d((x.size(2), x.size(3)))(x)
-            else:
-                p = nn.MaxPool2d((x.size(2), x.size(3)))(x)
-            atts.append(self.shared_mlp(p))
-        s = torch.stack(atts, 0).sum(0)
-        return x * torch.sigmoid(s).unsqueeze(2).unsqueeze(3).expand_as(x)
-
-
-class ChannelPool(nn.Module):
-    def forward(self, x):
-        return torch.cat((torch.max(x, 1)[0].unsqueeze(1), torch.mean(x, 1).unsqueeze(1)), dim=1)
-
-
-class SpatialAttention(nn.Module):
-    def __init__(self, kernel_size=7):
-        super().__init__()
-        self.compress = ChannelPool()
-        self.spatial_attention = nn.Sequential(
-            nn.Conv2d(2, 1, kernel_size, 1, (kernel_size - 1) // 2, bias=False),
-            nn.BatchNorm2d(1, eps=1e-5, momentum=0.01, affine=True))
-
-    def forward(self, x):
-        return x * torch.sigmoid(self.spatial_attention(self.compress(x)))
-
-
-class CBAM(nn.Module):
-    def __init__(self, channel_in, reduction_ratio=16, spatial=True):
-        super().__init__()
-        self.spatial = spatial
-        self.channel_attention = ChannelAttention(channel_in, reduction_ratio)
-        if spatial:
-            self.spatial_attention = SpatialAttention(7)
-
-    def forward(self, x):
-        x = self.channel_attention(x)
-        if self.spatial:
-            x = self.spatial_attention(x)
-        return x
-
-
-class BottleneckCBAM(nn.Module):
-    expansion = 4
-
-    def __init__(self, inplanes, planes, stride=1, downsample=None, use_cbam=True):
-        super().__init__()
-        self.conv1 = nn.Conv2d(inplanes, planes, 1, bias=False)
-        self.bn1 = nn.BatchNorm2d(planes)
-        self.conv2 = nn.Conv2d(planes, planes, 3, stride, 1, bias=False)
-        self.bn2 = nn.BatchNorm2d(planes)
-        self.conv3 = nn.Conv2d(planes, planes * 4, 1, bias=False)
-        self.bn3 = nn.BatchNorm2d(planes * 4)
-        self.relu = nn.ReLU(inplace=True)
-        self.downsample = downsample
-        self.cbam = CBAM(planes * 4) if use_cbam else None
-
-    def forward(self, x):
-        identity = x
-        out = self.relu(self.bn1(self.conv1(x)))
-        out = self.relu(self.bn2(self.conv2(out)))
-        out = self.bn3(self.conv3(out))
-        if self.cbam:
-            out = self.cbam(out)
-        if self.downsample is not None:
-            identity = self.downsample(x)
-        return self.relu(out + identity)
-
-
-class HierarchicalResNet50(nn.Module):
-    def __init__(self, num_classes=(2, 4, 2)):
-        super().__init__()
-        self.inplanes = 64
-        self.conv1 = nn.Conv2d(3, 64, 7, 2, 3, bias=False)
-        self.bn1 = nn.BatchNorm2d(64)
-        self.relu = nn.ReLU(inplace=True)
-        self.maxpool = nn.MaxPool2d(3, 2, 1)
-        self.layer1 = self._make_layer(64, 3)
-        self.layer2 = self._make_layer(128, 4, stride=2)
-        self.layer3 = self._make_layer(256, 6, stride=2)
-        self.layer4 = self._make_layer(512, 3, stride=2)
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        d = 2048
-        self.h1_layer = nn.Sequential(nn.Linear(d, 512), nn.BatchNorm1d(512), nn.ReLU(inplace=True), nn.Dropout(0.5))
-        self.h2_layer = nn.Sequential(nn.Linear(d + 512, 256), nn.BatchNorm1d(256), nn.ReLU(inplace=True), nn.Dropout(0.4))
-        self.h3_layer = nn.Sequential(nn.Linear(d + 512 + 256, 128), nn.BatchNorm1d(128), nn.ReLU(inplace=True), nn.Dropout(0.3))
-        self.classifier1 = nn.Linear(512, num_classes[0])
-        self.classifier2 = nn.Linear(256, num_classes[1])
-        self.classifier3 = nn.Linear(128, num_classes[2])
-
-    def _make_layer(self, planes, blocks, stride=1):
-        downsample = None
-        if stride != 1 or self.inplanes != planes * 4:
-            downsample = nn.Sequential(
-                nn.Conv2d(self.inplanes, planes * 4, 1, stride, bias=False),
-                nn.BatchNorm2d(planes * 4))
-        layers = [BottleneckCBAM(self.inplanes, planes, stride, downsample)]
-        self.inplanes = planes * 4
-        for _ in range(1, blocks):
-            layers.append(BottleneckCBAM(self.inplanes, planes))
-        return nn.Sequential(*layers)
-
-    def forward(self, x):
-        x = self.maxpool(self.relu(self.bn1(self.conv1(x))))
-        x = self.layer4(self.layer3(self.layer2(self.layer1(x))))
-        f = torch.flatten(self.avgpool(x), 1)
-        h1 = self.h1_layer(f); o1 = self.classifier1(h1)
-        h2 = self.h2_layer(torch.cat([f, h1], 1)); o2 = self.classifier2(h2)
-        h3 = self.h3_layer(torch.cat([f, h1, h2], 1)); o3 = self.classifier3(h3)
-        return [o1, o2, o3]
-
-
 class HierarchicalEfficientNetB4(nn.Module):
+    """EfficientNet-B4 backbone + đầu phân loại phân cấp 3 tầng (2, 4, 2)."""
+
     def __init__(self, num_classes=(2, 4, 2)):
         super().__init__()
         base = efficientnet_b4(weights=None)
@@ -277,33 +158,34 @@ class HierarchicalEfficientNetB4(nn.Module):
         return [o1, o2, o3]
 
 
+def build_flat_efficientnet_b4(num_classes=6):
+    """EfficientNet-B4 flat 6 lớp: [non_sino, admin, epitaph, scene, horizontal, vertical]."""
+    m = efficientnet_b4(weights=None)
+    m.classifier[1] = nn.Linear(m.classifier[1].in_features, num_classes)
+    return m
+
+
 # ==================== LOAD ====================
 def load_models():
-    """Trả về dict {tên: (model, kind)} — kind: 'hier224' | 'hier380' | 'flat380'.
+    """Trả về dict {tên: (model, kind)} — kind: 'hier380' | 'flat380'.
     Checkpoint thiếu sẽ bị bỏ qua."""
     models = {}
-    p = _resolve_checkpoint("ResNet50+CBAM")
-    if p.exists():
-        m = HierarchicalResNet50()
-        m.load_state_dict(torch.load(p, map_location="cpu", weights_only=False)["model_state_dict"])
-        m.eval().to(DEVICE)
-        models["ResNet50+CBAM"] = (m, "hier224")
-    p = _resolve_checkpoint("EfficientNet-B4 hierarchical")
+    p = _resolve_checkpoint(B4_HIER)
     if p.exists():
         m = HierarchicalEfficientNetB4()
-        m.load_state_dict(torch.load(p, map_location="cpu", weights_only=False)["model_state_dict"])
+        ckpt = torch.load(p, map_location="cpu", weights_only=False)
+        m.load_state_dict(ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt)
         m.eval().to(DEVICE)
-        models["EfficientNet-B4 hierarchical"] = (m, "hier380")
-    p = _resolve_checkpoint("EfficientNet-B4 flat")
+        models[B4_HIER] = (m, "hier380")
+    p = _resolve_checkpoint(B4_FLAT)
     if p.exists():
         sd = torch.load(p, map_location="cpu", weights_only=False)
         if isinstance(sd, dict) and "model_state_dict" in sd:
             sd = sd["model_state_dict"]
-        m = efficientnet_b4(weights=None)
-        m.classifier[1] = nn.Linear(m.classifier[1].in_features, 6)
+        m = build_flat_efficientnet_b4()
         m.load_state_dict(sd)
         m.eval().to(DEVICE)
-        models["EfficientNet-B4 flat"] = (m, "flat380")
+        models[B4_FLAT] = (m, "flat380")
     return models
 
 
@@ -325,9 +207,7 @@ def _flat_to_hier(p6):
 @torch.no_grad()
 def predict_one(model, kind, image_rgb):
     """Trả về (s1[2], s2[4], s3[2]) — softmax 3 tầng."""
-    if kind == "hier224":
-        t = IMAGENET_NORM(letterbox_resize(image_rgb, (224, 224)))
-    elif kind == "hier380":
+    if kind == "hier380":
         t = IMAGENET_NORM(letterbox_resize(image_rgb, (380, 380)))
     else:
         t = FLAT_TFM(image_rgb)
@@ -339,8 +219,31 @@ def predict_one(model, kind, image_rgb):
     return tuple(torch.softmax(p, 1)[0].cpu().numpy() for p in out)
 
 
+def ensemble_probs(hier_probs, flat_probs):
+    """Ensemble 2 model — y nguyên SinoClassificationService._predict_ensemble:
+    - Tầng 1, 2: trung bình softmax.
+    - Tầng 3 (dọc/ngang): ưu tiên dọc — chỉ cần 1 trong 2 model dự đoán dọc
+      thì s3 lấy theo model đó; cả 2 cùng dọc hoặc cùng ngang thì trung bình."""
+    s1 = np.mean([hier_probs[0], flat_probs[0]], axis=0)
+    s2 = np.mean([hier_probs[1], flat_probs[1]], axis=0)
+
+    vertical_idx = TEXT_DIRECTIONS["vertical"]
+    hier_s3, flat_s3 = hier_probs[2], flat_probs[2]
+    hier_vertical = int(hier_s3.argmax()) == vertical_idx
+    flat_vertical = int(flat_s3.argmax()) == vertical_idx
+    if hier_vertical and flat_vertical:
+        s3 = np.mean([hier_s3, flat_s3], axis=0)
+    elif hier_vertical:
+        s3 = hier_s3
+    elif flat_vertical:
+        s3 = flat_s3
+    else:
+        s3 = np.mean([hier_s3, flat_s3], axis=0)
+    return s1, s2, s3
+
+
 def predict_all(models, image):
-    """Chạy mọi model (đo thời gian) + các ensemble.
+    """Chạy 2 model (đo thời gian) + ensemble.
     Trả về dict {tên hệ: {"probs": (s1,s2,s3), "time": giây}}."""
     import time
     image_rgb = to_rgb(image)
@@ -350,18 +253,11 @@ def predict_all(models, image):
         probs = predict_one(m, kind, image_rgb)
         results[name] = {"probs": probs, "time": time.perf_counter() - t0}
 
-    def add_ens(label, member_names):
-        ms = [results[n] for n in member_names if n in results]
-        if len(ms) != len(member_names):
-            return
-        probs = tuple(np.mean([r["probs"][i] for r in ms], axis=0) for i in range(3))
-        results[label] = {"probs": probs, "time": sum(r["time"] for r in ms)}
-
-    R, BH, BF = "ResNet50+CBAM", "EfficientNet-B4 hierarchical", "EfficientNet-B4 flat"
-    add_ens("Ens: B4 hier + B4 flat", [BH, BF])
-    add_ens("Ens: ResNet + B4 hier", [R, BH])
-    add_ens("Ens: ResNet + B4 flat", [R, BF])
-    add_ens("⭐ Ensemble 3 model", [R, BH, BF])
+    if B4_HIER in results and B4_FLAT in results:
+        results[ENSEMBLE] = {
+            "probs": ensemble_probs(results[B4_HIER]["probs"], results[B4_FLAT]["probs"]),
+            "time": results[B4_HIER]["time"] + results[B4_FLAT]["time"],
+        }
     return results
 
 
