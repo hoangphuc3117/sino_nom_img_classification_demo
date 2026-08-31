@@ -1,6 +1,6 @@
-"""Định nghĩa 2 model (EfficientNet-B4 hierarchical + EfficientNet-B4 flat),
-tiền xử lý và hàm dự đoán cho web demo.
-Đồng bộ y nguyên với han-nom-classification_cp/src/services/sino_classification_service.py.
+"""Định nghĩa model EfficientNet-B4 hierarchical + tiền xử lý + hàm dự đoán cho web demo.
+Tiền xử lý đồng bộ y nguyên với han-nom-classification_cp/src/services/sino_classification_service.py
+(bản rút gọn: chỉ chạy 1 model B4 hierarchical, không ensemble).
 Tách khỏi app.py để test được không cần Streamlit."""
 import os
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
@@ -19,17 +19,13 @@ ROOT = Path(__file__).resolve().parent.parent  # thư mục dự án (cha của 
 # Đường dẫn checkpoint (bộ triển khai slim)
 MODELS_DIR = Path(__file__).resolve().parent / "models"   # web_demo/models/
 B4_HIER = "EfficientNet-B4 hierarchical"
-B4_FLAT = "EfficientNet-B4 flat"
-ENSEMBLE = "⭐ Ensemble B4 hier + B4 flat"
 
 CKPTS = {
     B4_HIER: MODELS_DIR / "best_hierarchical_b4.pth",
-    B4_FLAT: MODELS_DIR / "best_accuracy_b4_modified.pth",
 }
 
 KAGGLE_MODEL_IDS = {
     B4_HIER: "phuchoangnguyen/sinonomimg-eb4-hier/pyTorch/default",
-    B4_FLAT: "phuchoangnguyen/sinonomimg-eb4-flat/pyTorch/default",
 }
 
 def _local_checkpoint(name):
@@ -97,8 +93,6 @@ torch.set_num_threads(max(1, os.cpu_count() - 2))
 
 IMAGENET_NORM = T.Compose([T.ToTensor(),
                            T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
-FLAT_TFM = T.Compose([T.Resize((380, 380), antialias=True), T.ToTensor(),
-                      T.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
 
 
 def cap_long_side(image, max_side=512):
@@ -158,16 +152,9 @@ class HierarchicalEfficientNetB4(nn.Module):
         return [o1, o2, o3]
 
 
-def build_flat_efficientnet_b4(num_classes=6):
-    """EfficientNet-B4 flat 6 lớp: [non_sino, admin, epitaph, scene, horizontal, vertical]."""
-    m = efficientnet_b4(weights=None)
-    m.classifier[1] = nn.Linear(m.classifier[1].in_features, num_classes)
-    return m
-
-
 # ==================== LOAD ====================
 def load_models():
-    """Trả về dict {tên: (model, kind)} — kind: 'hier380' | 'flat380'.
+    """Trả về dict {tên: (model, kind)} — kind: 'hier380'.
     Checkpoint thiếu sẽ bị bỏ qua."""
     models = {}
     p = _resolve_checkpoint(B4_HIER)
@@ -177,73 +164,22 @@ def load_models():
         m.load_state_dict(ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt)
         m.eval().to(DEVICE)
         models[B4_HIER] = (m, "hier380")
-    p = _resolve_checkpoint(B4_FLAT)
-    if p.exists():
-        sd = torch.load(p, map_location="cpu", weights_only=False)
-        if isinstance(sd, dict) and "model_state_dict" in sd:
-            sd = sd["model_state_dict"]
-        m = build_flat_efficientnet_b4()
-        m.load_state_dict(sd)
-        m.eval().to(DEVICE)
-        models[B4_FLAT] = (m, "flat380")
     return models
 
 
 # ==================== DỰ ĐOÁN ====================
-def _flat_to_hier(p6):
-    """[non_sino, admin, epitaph, scene, horizontal, vertical] -> (s1, s2, s3)"""
-    # De-smoothing: đảo ngược label_smoothing=0.05 lúc train B4 flat — trả trần tự tin
-    # từ ~0.958 về ~1.0 để ngang thang với model hierarchical khi ensemble (23/08)
-    p6 = np.clip(p6 - 0.05 / 6, 0.0, None)
-    p6 = p6 / max(1e-9, p6.sum())
-    s1 = np.array([1.0 - p6[0], p6[0]])
-    s2 = np.array([p6[4] + p6[5], p6[1], p6[3], p6[2]])
-    s2 = s2 / max(1e-9, s2.sum())
-    s3 = np.array([p6[5], p6[4]])
-    s3 = s3 / max(1e-9, s3.sum())
-    return s1, s2, s3
-
-
 @torch.no_grad()
 def predict_one(model, kind, image_rgb):
-    """Trả về (s1[2], s2[4], s3[2]) — softmax 3 tầng."""
-    if kind == "hier380":
-        t = IMAGENET_NORM(letterbox_resize(image_rgb, (380, 380)))
-    else:
-        t = FLAT_TFM(image_rgb)
+    """Trả về (s1[2], s2[4], s3[2]) — softmax 3 tầng.
+    Tiền xử lý: letterbox 380 + ImageNet norm (khớp service)."""
+    t = IMAGENET_NORM(letterbox_resize(image_rgb, (380, 380)))
     t = t.unsqueeze(0).to(DEVICE)
     out = model(t)
-    if kind == "flat380":
-        p6 = torch.softmax(out, 1)[0].cpu().numpy()
-        return _flat_to_hier(p6)
     return tuple(torch.softmax(p, 1)[0].cpu().numpy() for p in out)
 
 
-def ensemble_probs(hier_probs, flat_probs):
-    """Ensemble 2 model — y nguyên SinoClassificationService._predict_ensemble:
-    - Tầng 1, 2: trung bình softmax.
-    - Tầng 3 (dọc/ngang): ưu tiên dọc — chỉ cần 1 trong 2 model dự đoán dọc
-      thì s3 lấy theo model đó; cả 2 cùng dọc hoặc cùng ngang thì trung bình."""
-    s1 = np.mean([hier_probs[0], flat_probs[0]], axis=0)
-    s2 = np.mean([hier_probs[1], flat_probs[1]], axis=0)
-
-    vertical_idx = TEXT_DIRECTIONS["vertical"]
-    hier_s3, flat_s3 = hier_probs[2], flat_probs[2]
-    hier_vertical = int(hier_s3.argmax()) == vertical_idx
-    flat_vertical = int(flat_s3.argmax()) == vertical_idx
-    if hier_vertical and flat_vertical:
-        s3 = np.mean([hier_s3, flat_s3], axis=0)
-    elif hier_vertical:
-        s3 = hier_s3
-    elif flat_vertical:
-        s3 = flat_s3
-    else:
-        s3 = np.mean([hier_s3, flat_s3], axis=0)
-    return s1, s2, s3
-
-
 def predict_all(models, image):
-    """Chạy 2 model (đo thời gian) + ensemble.
+    """Chạy model B4 hierarchical (đo thời gian).
     Trả về dict {tên hệ: {"probs": (s1,s2,s3), "time": giây}}."""
     import time
     image_rgb = to_rgb(image)
@@ -252,12 +188,6 @@ def predict_all(models, image):
         t0 = time.perf_counter()
         probs = predict_one(m, kind, image_rgb)
         results[name] = {"probs": probs, "time": time.perf_counter() - t0}
-
-    if B4_HIER in results and B4_FLAT in results:
-        results[ENSEMBLE] = {
-            "probs": ensemble_probs(results[B4_HIER]["probs"], results[B4_FLAT]["probs"]),
-            "time": results[B4_HIER]["time"] + results[B4_FLAT]["time"],
-        }
     return results
 
 
