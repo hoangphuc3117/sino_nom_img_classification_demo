@@ -89,7 +89,7 @@ L3_NAMES = ["vertical (dọc)", "horizontal (ngang)"]
 
 # Chạy inference trên CPU (theo yêu cầu — dễ so thời gian, không phụ thuộc GPU)
 DEVICE = torch.device("cpu")
-torch.set_num_threads(4)
+torch.set_num_threads(1)
 
 IMAGENET_NORM = T.Compose([T.ToTensor(),
                            T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
