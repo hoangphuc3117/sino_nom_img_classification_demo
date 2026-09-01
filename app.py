@@ -1,5 +1,4 @@
-"""Web demo phân loại ảnh tài liệu Hán Nôm — EfficientNet-B4 hierarchical.
-Tiền xử lý đồng bộ y nguyên với han-nom-classification_cp/src/services/sino_classification_service.py.
+"""Web demo phân loại ảnh tài liệu Hán Nôm — 3 model + Ensemble.
 Chạy:  streamlit run web_demo/app.py
 """
 import streamlit as st
@@ -14,7 +13,7 @@ st.title("🏮 Phân loại ảnh tài liệu Hán Nôm")
 st.caption(f"3 tầng: SinoNom/NonSinoNom → loại tài liệu → hướng chữ · Inference: **CPU** ({DEVICE})")
 
 
-@st.cache_resource(show_spinner="Đang load model B4 hierarchical (lần đầu ~5s)...")
+@st.cache_resource(show_spinner="Đang load 3 model (lần đầu ~15s)...")
 def get_models():
     return load_models()
 
@@ -27,6 +26,11 @@ with st.sidebar:
         ok = name in models
         st.markdown(f"{'✅' if ok else '❌'} **{name}**")
         st.caption(str(p.relative_to(p.parents[2])) if len(p.parents) > 2 else str(p))
+    if len(models) >= 2:
+        st.markdown("**Ensemble** = trung bình softmax; thời gian ensemble = tổng thời gian thành viên")
+    st.divider()
+    st.caption("Kết quả trên test 260 ảnh (18/08): Ensemble 3 model sai 6/260 · "
+               "L2 99.1% · L3 100%")
 
 if not models:
     st.error("Không load được model nào — kiểm tra đường dẫn checkpoint trong web_demo/model_defs.py")
@@ -36,7 +40,7 @@ uploaded = st.file_uploader("Tải ảnh tài liệu lên (jpg/png/webp...)",
                             type=["jpg", "jpeg", "png", "webp", "bmp", "tif", "tiff"])
 
 if uploaded is None:
-    st.info("⬆️ Tải một ảnh lên để phân loại bằng model B4 hierarchical.")
+    st.info("⬆️ Tải một ảnh lên để phân loại. Ảnh sẽ được chạy qua từng model riêng lẻ và bản ensemble.")
     st.stop()
 
 image = Image.open(uploaded)
@@ -50,8 +54,17 @@ with st.spinner("Đang phân loại..."):
     results = predict_all(models, image)
 
 with col_res:
-    for name, entry in results.items():
+    names = list(results.keys())
+    # Thu tu: Ens 3 model -> 3 ensemble cap -> 3 model don
+    def order(n):
+        if n.startswith("⭐"): return 0
+        if n.startswith("Ens:"): return 1
+        return 2
+    names.sort(key=order)
+    for name in names:
+        entry = results[name]
         d = decode(entry["probs"])
+        is_ens = name.startswith("⭐")
         with st.container(border=True):
             head_l, head_m, head_r = st.columns([3, 1, 2])
             with head_l:
@@ -59,7 +72,10 @@ with col_res:
             with head_m:
                 st.metric("⏱ giây", f"{entry['time']:.2f}")
             with head_r:
-                st.success(f"**{d['final']}**")
+                if is_ens:
+                    st.success(f"**{d['final']}**")
+                else:
+                    st.info(f"**{d['final']}**")
             c1, c2, c3 = st.columns(3)
             with c1:
                 lbl, p, dist = d["L1"]
@@ -90,4 +106,5 @@ with col_res:
                             st.caption(f"{n}: {100*dist[i]:.1f}%")
 
 st.divider()
-st.caption("L2 chỉ hiển thị khi L1 = SinoNom; L3 chỉ hiển thị khi L2 = general (đúng logic phân cấp).")
+st.caption("L2 chỉ hiển thị khi L1 = SinoNom; L3 chỉ hiển thị khi L2 = general (đúng logic phân cấp). "
+           "Model flat 6 lớp được ánh xạ về 3 tầng để so cùng thước đo.")
