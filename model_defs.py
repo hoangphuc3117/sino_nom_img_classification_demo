@@ -225,7 +225,13 @@ def ensemble_probs(hier_probs, flat_probs):
     - Tầng 1, 2: trung bình softmax.
     - Tầng 3 (dọc/ngang): ưu tiên dọc — chỉ cần 1 trong 2 model dự đoán dọc
       thì s3 lấy theo model đó; cả 2 cùng dọc hoặc cùng ngang thì trung bình."""
-    s1 = np.mean([hier_probs[0], flat_probs[0]], axis=0)
+    sino_idx = 0
+    hier_sino = float(hier_probs[0][sino_idx])
+    flat_sino = float(flat_probs[0][sino_idx])
+    if hier_sino > 0.7 or flat_sino > 0.7:
+        s1 = np.array([1.0, 0.0], dtype=np.float32)
+    else:
+        s1 = np.mean([hier_probs[0], flat_probs[0]], axis=0)
     s2 = np.mean([hier_probs[1], flat_probs[1]], axis=0)
 
     vertical_idx = TEXT_DIRECTIONS["vertical"]
