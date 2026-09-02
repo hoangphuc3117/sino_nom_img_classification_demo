@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 import torchvision.transforms as T
 from torchvision.models import efficientnet_b4
-from PIL import Image
+from PIL import Image, ImageOps
 
 ROOT = Path(__file__).resolve().parent.parent  # thư mục dự án (cha của web_demo/)
 
@@ -120,17 +120,18 @@ def letterbox_resize(image, size, fill=(255, 255, 255)):
     return canvas.resize(size, Image.BILINEAR)
 
 
-def to_rgb(image):
-    if image.mode == 'P' and 'transparency' in image.info:
+def normalize_pil_image(image):
+    image = ImageOps.exif_transpose(image)
+
+    if image.mode == 'P':
         image = image.convert('RGBA')
-    if image.mode == 'RGBA':
-        bg = Image.new('RGB', image.size, (255, 255, 255))
-        bg.paste(image, mask=image.split()[-1])
-        image = bg
-    elif image.mode != 'RGB':
-        image = image.convert('RGB')
-    # Luôn chuẩn hoá độ phân giải làm việc trước khi vào model (23/08)
-    return cap_long_side(image)
+
+    return image.convert('RGB')
+
+
+def prepare_hier_image(image):
+    # Nhánh hierarchical vẫn giữ bước giới hạn cạnh dài như pipeline hiện tại.
+    return cap_long_side(normalize_pil_image(image))
 
 
 # ==================== KIẾN TRÚC ====================
@@ -205,12 +206,12 @@ def _flat_to_hier(p6):
 
 
 @torch.no_grad()
-def predict_one(model, kind, image_rgb):
+def predict_one(model, kind, image):
     """Trả về (s1[2], s2[4], s3[2]) — softmax 3 tầng."""
     if kind == "hier380":
-        t = IMAGENET_NORM(letterbox_resize(image_rgb, (380, 380)))
+        t = IMAGENET_NORM(letterbox_resize(prepare_hier_image(image), (380, 380)))
     else:
-        t = FLAT_TFM(image_rgb)
+        t = FLAT_TFM(normalize_pil_image(image))
     t = t.unsqueeze(0).to(DEVICE)
     out = model(t)
     if kind == "flat380":
@@ -246,11 +247,10 @@ def predict_all(models, image):
     """Chạy 2 model (đo thời gian) + ensemble.
     Trả về dict {tên hệ: {"probs": (s1,s2,s3), "time": giây}}."""
     import time
-    image_rgb = to_rgb(image)
     results = {}
     for name, (m, kind) in models.items():
         t0 = time.perf_counter()
-        probs = predict_one(m, kind, image_rgb)
+        probs = predict_one(m, kind, image)
         results[name] = {"probs": probs, "time": time.perf_counter() - t0}
 
     if B4_HIER in results and B4_FLAT in results:
