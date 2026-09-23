@@ -77,10 +77,15 @@ def cap_long_side(image, max_side=512):
 def letterbox_resize(image, size, fill=(255, 255, 255)):
     w, h = image.size; side = max(w, h); c = Image.new("RGB", (side, side), fill); c.paste(image, ((side - w) // 2, (side - h) // 2)); return c.resize(size, Image.BILINEAR)
 
-def text_views(image, tiles=True):
-    """Toàn khung + 4 tile 2×2 chồng 12% cắt từ ảnh gốc (ngưỡng 0.50 đo với cấu hình này)."""
-    if not tiles: return [image]
+TILE_MODES = {"0": "chỉ toàn khung", "1": "toàn khung + 1 tile giữa (56 % mỗi chiều)", "4": "toàn khung + 4 tile 2×2 (chồng 12 %)"}
+def text_views(image, tiles="1"):
+    """Các khung đưa vào nhánh chữ. tiles: "0" = chỉ toàn khung; "1" = thêm 1 tile giữa cỡ 56 %×56 % (cùng cỡ với tile góc);
+    "4" = thêm 4 tile 2×2 chồng 12 % (cấu hình đo ngưỡng 0.50 ban đầu). True/False cũ ánh xạ sang "4"/"0"."""
+    if tiles is True: tiles = "4"
+    if tiles is False or tiles in ("0", 0): return [image]
     w, h = image.size; ov = 0.12; tw, th = int(w * (0.5 + ov / 2)), int(h * (0.5 + ov / 2)); vs = [image]
+    if str(tiles) == "1":
+        x0, y0 = (w - tw) // 2, (h - th) // 2; vs.append(image.crop((x0, y0, x0 + tw, y0 + th))); return vs
     for x0 in (0, w - tw):
         for y0 in (0, h - th): vs.append(image.crop((x0, y0, x0 + tw, y0 + th)))
     return vs
@@ -111,7 +116,7 @@ def load_models():
 
 # ==================== DỰ ĐOÁN ====================
 @torch.no_grad()
-def text_score(model, image_rgb, tiles=True):
+def text_score(model, image_rgb, tiles="1"):
     x = torch.stack([TEXT_TFM(v) for v in text_views(image_rgb, tiles)]).to(DEVICE)
     s = torch.sigmoid(model(x))                      # [views, 24, 24]
     per_view = s.flatten(1).max(1).values.cpu().numpy()
@@ -145,7 +150,7 @@ def ensemble_23(hier_probs, flat_probs, w_flat=W_FLAT_TIER2):
     s3 = np.mean([h3, f3], 0) if (hv and fv) else h3 if hv else f3 if fv else np.mean([h3, f3], 0)
     return s2, s3
 
-def classify(models, image, tiles=True, threshold=TEXT_THRESHOLD, w_flat=W_FLAT_TIER2, reuse_tier1=None):
+def classify(models, image, tiles="1", threshold=TEXT_THRESHOLD, w_flat=W_FLAT_TIER2, reuse_tier1=None):
     """Một lượt phân loại đủ 3 tầng + chiều ảnh. Trả dict có xác suất từng model, kết quả gộp, thời gian từng bước.
     reuse_tier1: kết quả lượt trước để dùng lại tầng 1 (có/không có Hán Nôm không đổi khi xoay/lật ảnh) → lượt 2 chỉ chạy flat + DHC + chiều."""
     img = normalize_pil_image(image); r = {"size": img.size, "times": {}}
@@ -170,7 +175,7 @@ def classify(models, image, tiles=True, threshold=TEXT_THRESHOLD, w_flat=W_FLAT_
             r.update(orientation=ori, orient_conf=conf, orient_probs=pvec)
     r["times"]["tổng"] = sum(r["times"].values()); return r
 
-def classify_with_fix(models, image, tiles=True, threshold=TEXT_THRESHOLD, w_flat=W_FLAT_TIER2, min_conf=ORIENT_MIN_CONF):
+def classify_with_fix(models, image, tiles="1", threshold=TEXT_THRESHOLD, w_flat=W_FLAT_TIER2, min_conf=ORIENT_MIN_CONF):
     """Luồng đầy đủ: phân loại → nếu general và chiều ≠ 0 với độ tin ≥ min_conf → sửa ảnh → phân loại lại → dùng kết quả lần 2.
     Trả (kết quả lần 1, kết quả lần 2 hoặc None, ảnh đã sửa hoặc None)."""
     r1 = classify(models, image, tiles, threshold, w_flat)

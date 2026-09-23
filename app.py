@@ -28,7 +28,9 @@ with st.sidebar:
     for key, p in CKPTS.items():
         st.markdown(f"{'✅' if key in models else '❌'} **{labels[key]}**"); st.caption(p.name)
     st.divider(); st.header("Tuỳ chọn")
-    use_tiles = st.toggle("Tầng 1 cắt thêm 4 tile (chính xác hơn với chữ nhỏ, chậm hơn ≈3×)", value=True)
+    from model_defs import TILE_MODES
+    use_tiles = st.radio("Tầng 1: số khung đưa vào nhánh chữ", options=list(TILE_MODES), index=1, format_func=lambda k: TILE_MODES[k],
+                         help="1 tile giữa: ≈2× thời gian toàn khung, bắt chữ nhỏ ở giữa ảnh. 4 tile: ≈4×, bắt chữ nhỏ ở mọi góc.")
     threshold = st.slider("Ngưỡng tầng 1 (điểm nhánh chữ)", 0.10, 0.90, TEXT_THRESHOLD, 0.05)
     w_flat = st.slider("Trọng số flat ở tầng 2 (DHC = 1 − w)", 0.0, 1.0, W_FLAT_TIER2, 0.1)
     auto_fix = st.toggle("Tự sửa chiều ảnh rồi phân loại lại", value=True)
@@ -66,7 +68,7 @@ def show_result(r, title):
             st.markdown(f"**Tầng 1:** {'SinoNom' if r['is_sino'] else 'NonSinoNom'} — điểm chữ {r['p_text']:.2f} (ngưỡng {threshold:.2f})")
             st.progress(min(1.0, r["p_text"]))
             with st.expander("điểm từng khung"):
-                names = ["toàn khung", "tile trên-trái", "tile trên-phải", "tile dưới-trái", "tile dưới-phải"]
+                names = ["toàn khung", "tile giữa"] if len(r["per_view"]) == 2 else ["toàn khung", "tile trên-trái", "tile trên-phải", "tile dưới-trái", "tile dưới-phải"]
                 for n, v in zip(names, r["per_view"]): st.caption(f"{n}: {v:.2f}")
         with c2:
             if "s2" not in r: st.markdown("**Tầng 2:** —")
