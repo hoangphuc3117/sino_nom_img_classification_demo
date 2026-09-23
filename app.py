@@ -29,8 +29,8 @@ with st.sidebar:
         st.markdown(f"{'✅' if key in models else '❌'} **{labels[key]}**"); st.caption(p.name)
     st.divider(); st.header("Tuỳ chọn")
     from model_defs import TILE_MODES
-    use_tiles = st.radio("Tầng 1: số khung đưa vào nhánh chữ", options=list(TILE_MODES), index=1, format_func=lambda k: TILE_MODES[k],
-                         help="1 tile giữa: ≈2× thời gian toàn khung, bắt chữ nhỏ ở giữa ảnh. 4 tile: ≈4×, bắt chữ nhỏ ở mọi góc.")
+    use_tiles = st.radio("Tầng 1: số khung đưa vào nhánh chữ", options=list(TILE_MODES), index=0, format_func=lambda k: TILE_MODES[k],
+                         help="Bậc thang: ~90% ảnh chỉ chạy toàn khung (≈0,55 s); ảnh chưa đạt ngưỡng mới chấm thêm 2 tile (≈+1 s). Test: T=0,5 sót 4, nhầm 34.")
     threshold = st.slider("Ngưỡng tầng 1 (điểm nhánh chữ)", 0.10, 0.90, TEXT_THRESHOLD, 0.05)
     w_flat = st.slider("Trọng số flat ở tầng 2 (DHC = 1 − w)", 0.0, 1.0, W_FLAT_TIER2, 0.1)
     auto_fix = st.toggle("Tự sửa chiều ảnh rồi phân loại lại", value=True)
@@ -68,7 +68,7 @@ def show_result(r, title):
             st.markdown(f"**Tầng 1:** {'SinoNom' if r['is_sino'] else 'NonSinoNom'} — điểm chữ {r['p_text']:.2f} (ngưỡng {threshold:.2f})")
             st.progress(min(1.0, r["p_text"]))
             with st.expander("điểm từng khung"):
-                names = ["toàn khung", "tile giữa"] if len(r["per_view"]) == 2 else ["toàn khung", "tile trên-trái", "tile trên-phải", "tile dưới-trái", "tile dưới-phải"]
+                names = ["toàn khung", "tile vùng cao 1", "tile vùng cao 2"] if use_tiles == "cascade" else (["toàn khung", "tile điểm cao nhất" if use_tiles == "1" else "tile giữa"]) if len(r["per_view"]) == 2 else ["toàn khung", "tile trên-trái", "tile trên-phải", "tile dưới-trái", "tile dưới-phải"]
                 for n, v in zip(names, r["per_view"]): st.caption(f"{n}: {v:.2f}")
         with c2:
             if "s2" not in r: st.markdown("**Tầng 2:** —")
@@ -96,6 +96,11 @@ def show_result(r, title):
 col_img, col_res = st.columns([1, 2], gap="large")
 with col_img:
     st.image(image, caption=f"{uploaded.name} · {image.size[0]}×{image.size[1]}px", use_container_width=True)
+    if r1.get("tile_box") is not None:
+        from PIL import ImageDraw as _D
+        _im = normalize_pil_image(image).copy(); _d = _D.Draw(_im)
+        for _k, _b in enumerate(r1["tile_box"]): _d.rectangle(_b, outline=[(0, 160, 255), (255, 140, 0)][_k % 2], width=max(3, _im.width // 150))
+        st.image(_im, caption="Tile đã chấm (xanh: vùng cao nhất, cam: vùng cao thứ hai)", use_container_width=True)
     if fixed is not None:
         st.image(fixed, caption=f"Ảnh đã sửa chiều ({r1['orientation']} → thẳng)", use_container_width=True)
     if r1.get("grid") is not None and r1["is_sino"]:
