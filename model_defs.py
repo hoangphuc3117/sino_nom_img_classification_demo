@@ -1,6 +1,6 @@
 """Định nghĩa model + pipeline cho web demo (bản 24/09/2026, dùng bộ models_best):
   Tầng 1  nhánh chữ Hán Nôm (EfficientNet-B4, lưới 24×24 @768, toàn khung + 4 tile) — điểm > T (0.50) → có Hán Nôm.
-  Tầng 2  4 nhóm = trung bình 0.5/0.5 của DHC (đầu tầng 2) và flat (8 nhãn con gộp về 6 lớp, khử label smoothing) — y logic service.
+  Tầng 2  4 nhóm = trung bình 0.5/0.5 của DHC rotswap (đầu tầng 2) và flat 6 lớp (khử label smoothing) — y logic service hn_classification v3.
   Tầng 3  dọc/ngang chỉ khi nhóm = general: một model nói dọc → lấy vector model đó (OR-dọc).
   Chiều   PP-LCNet 5 lớp (0/90/180/270/mirror) chỉ cho general; nếu lệch và tin ≥ 0.8 → sửa ảnh, phân loại lại (luồng đã áp dụng ở hn_classification).
 Tách khỏi app.py để test được không cần Streamlit."""
@@ -16,8 +16,8 @@ from pplcnet_torch import PPLCNetDocOrientation
 MODELS_DIR = Path(__file__).resolve().parent / "models"
 CKPTS = {
     "text":   MODELS_DIR / "text_branch_r6.pth",       # nhánh chữ vòng 6
-    "flat":   MODELS_DIR / "flat_b4_scratch_ep9.pth",  # flat 8 nhãn con, train từ đầu, EMA epoch 9
-    "dhc":    MODELS_DIR / "dhc_b4_scratch.pth",       # hierarchical 2/4/2, train từ đầu
+    "flat":   MODELS_DIR / "flat_b4_6cls.pth",         # flat 6 lớp (SERVICE6), warm start từ flat 8 nhãn, 24/09/2026
+    "dhc":    MODELS_DIR / "dhc_b4_rotswap.pth",       # hierarchical 2/4/2, fine-tune xoay đổi nhãn (giống service)
     "orient": MODELS_DIR / "orient5_pplcnet.pth",      # chiều ảnh 5 lớp
 }
 TEXT_THRESHOLD = 0.50      # ngưỡng tầng 1 (đo với tile trên test_full: tầng 1 96.2%, sót 4/1162, nhận nhầm 45/116)
@@ -53,8 +53,8 @@ class HierarchicalEfficientNetB4(nn.Module):
         f = torch.flatten(self.avgpool(self.features(x)), 1); h1 = self.h1_layer(f); h2 = self.h2_layer(torch.cat([f, h1], 1)); h3 = self.h3_layer(torch.cat([f, h1, h2], 1))
         return [self.classifier1(h1), self.classifier2(h2), self.classifier3(h3)]
 
-def build_flat8():
-    m = efficientnet_b4(weights=None); m.classifier = nn.Sequential(nn.Dropout(0.4), nn.Linear(1792, 8)); return m
+def build_flat(num_classes):
+    m = efficientnet_b4(weights=None); m.classifier = nn.Sequential(nn.Dropout(0.4), nn.Linear(1792, num_classes)); return m
 
 # ==================== TIỀN XỬ LÝ ====================
 IMAGENET_NORM = T.Compose([T.ToTensor(), T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
@@ -105,7 +105,9 @@ def load_models():
         m.load_state_dict({k: v for k, v in sd.items() if k.startswith(("features.", "score."))}); models["text"] = m.eval().to(DEVICE)
     p = CKPTS["flat"]
     if p.exists():
-        m = build_flat8(); sd = torch.load(p, map_location="cpu", weights_only=False); m.load_state_dict(sd.get("model_state_dict", sd) if isinstance(sd, dict) else sd); models["flat"] = m.eval().to(DEVICE)
+        sd = torch.load(p, map_location="cpu", weights_only=False); sd = sd.get("model_state_dict", sd) if isinstance(sd, dict) else sd
+        n = int(sd["classifier.1.weight"].shape[0])   # 6 lớp (SERVICE6) hoặc 8 nhãn con (FLAT8_CLASSES)
+        m = build_flat(n); m.load_state_dict(sd); m.num_classes = n; models["flat"] = m.eval().to(DEVICE)
     p = CKPTS["dhc"]
     if p.exists():
         m = HierarchicalEfficientNetB4(); ck = torch.load(p, map_location="cpu", weights_only=False); m.load_state_dict(ck["model_state_dict"] if "model_state_dict" in ck else ck); models["dhc"] = m.eval().to(DEVICE)
@@ -162,9 +164,11 @@ def _flat_to_hier(p6):
 
 @torch.no_grad()
 def predict_flat(model, image_rgb):
-    p8 = torch.softmax(model(FLAT_TFM(image_rgb).unsqueeze(0).to(DEVICE)), 1)[0].cpu().numpy(); p6 = np.zeros(6)
-    for k, j in enumerate(MAP8): p6[j] += float(p8[k])
-    return _flat_to_hier(p6), p8
+    p = torch.softmax(model(FLAT_TFM(image_rgb).unsqueeze(0).to(DEVICE)), 1)[0].cpu().numpy()
+    if p.shape[0] == 6: return _flat_to_hier(p), None   # flat 6 lớp: không có nhãn con scene
+    p6 = np.zeros(6)
+    for k, j in enumerate(MAP8): p6[j] += float(p[k])
+    return _flat_to_hier(p6), p
 
 @torch.no_grad()
 def predict_dhc(model, image_rgb):
@@ -199,7 +203,7 @@ def classify(models, image, tiles="cascade", threshold=TEXT_THRESHOLD, w_flat=W_
     s2, s3 = ensemble_23(dhc_h, flat_h, w_flat); i2 = int(s2.argmax()); i3 = int(s3.argmax())
     r.update(flat=flat_h, flat_p8=p8, dhc=dhc_h, s2=s2, s3=s3, doc_type=L2_NAMES[i2], doc_conf=float(s2[i2]))
     r["final"] = L2_NAMES[i2]
-    if i2 == 2:  # scene → nhãn con theo flat
+    if i2 == 2 and p8 is not None:  # scene → nhãn con theo flat (chỉ flat 8 nhãn)
         r["scene_sublabel"] = FLAT8_CLASSES[3 + int(np.argmax(p8[3:6]))]; r["final"] = f"scene / {r['scene_sublabel']}"
     if i2 == 0:  # general → hướng chữ + chiều ảnh
         r["direction"] = L3_NAMES[i3]; r["dir_conf"] = float(s3[i3]); r["final"] = f"general / {L3_NAMES[i3]}"
