@@ -157,6 +157,21 @@ def text_score(model, image_rgb, tiles="cascade", threshold=None):
     per_view = s.flatten(1).max(1).values.cpu().numpy()
     return float(per_view.max()), per_view, s[0].cpu().numpy()   # điểm ảnh, điểm từng khung, lưới toàn khung (để vẽ heatmap)
 
+def _jet(v):
+    """Bảng màu jet (xanh dương → xanh lá → vàng → đỏ) cho mảng [0,1] → uint8 RGB, không cần matplotlib."""
+    v = np.clip(v, 0.0, 1.0)[..., None]
+    r = np.clip(1.5 - np.abs(4 * v - 3), 0, 1); g = np.clip(1.5 - np.abs(4 * v - 2), 0, 1); b = np.clip(1.5 - np.abs(4 * v - 1), 0, 1)
+    return (np.concatenate([r, g, b], -1) * 255).astype(np.uint8)
+
+def heatmap_overlay(image_rgb, grid, alpha=0.55, max_side=1600):
+    """Phủ lưới điểm nhánh chữ (24×24, tính trên ảnh resize thẳng về 768×768) lên ảnh gốc.
+    Lưới được phóng song tuyến lên đúng kích thước ảnh nên từng ô khớp vùng ảnh; ô điểm càng cao càng đậm màu (đỏ = chắc chắn có chữ Hán Nôm)."""
+    im = normalize_pil_image(image_rgb).copy(); im.thumbnail((max_side, max_side))
+    g = np.asarray(Image.fromarray((np.clip(grid, 0, 1) * 255).astype(np.uint8)).resize(im.size, Image.BILINEAR), np.float32) / 255.0
+    a = (alpha * (0.15 + 0.85 * g))[..., None]           # vùng điểm thấp gần như thấy ảnh gốc, vùng điểm cao phủ màu đậm
+    out = np.asarray(im, np.float32) * (1 - a) + _jet(g).astype(np.float32) * a
+    return Image.fromarray(out.clip(0, 255).astype(np.uint8))
+
 def _flat_to_hier(p6):
     p6 = np.clip(p6 - 0.05 / 6, 0.0, None); p6 = p6 / max(1e-9, p6.sum())     # khử label smoothing như service
     s1 = np.array([1.0 - p6[0], p6[0]]); s2 = np.array([p6[4] + p6[5], p6[1], p6[3], p6[2]]); s2 = s2 / max(1e-9, s2.sum())

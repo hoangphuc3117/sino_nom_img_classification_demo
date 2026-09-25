@@ -5,7 +5,7 @@ import numpy as np
 import streamlit as st
 from PIL import Image
 
-from model_defs import (load_models, classify, classify_with_fix, fix_orientation, normalize_pil_image,
+from model_defs import (load_models, classify, classify_with_fix, fix_orientation, normalize_pil_image, heatmap_overlay,
                         CKPTS, DEVICE, TEXT_THRESHOLD, ORIENT_MIN_CONF, W_FLAT_TIER2,
                         L1_NAMES, L2_NAMES, L3_NAMES, ORIENT_CLASSES, FLAT8_CLASSES)
 
@@ -49,11 +49,16 @@ if uploaded is None:
     st.info("⬆️ Tải một ảnh lên để phân loại."); st.stop()
 
 image = Image.open(uploaded)
-with st.spinner("Đang phân loại..."):
-    if auto_fix:
-        r1, r2, fixed = classify_with_fix(models, image, use_tiles, threshold, w_flat, min_conf)
-    else:
-        r1, r2, fixed = classify(models, image, use_tiles, threshold, w_flat), None, None
+# Giữ kết quả theo (ảnh, tham số): kéo thanh độ đậm heatmap không phải chạy lại model
+run_key = (uploaded.name, uploaded.size, hash(uploaded.getvalue()), use_tiles, threshold, w_flat, auto_fix, min_conf)
+if st.session_state.get("run_key") != run_key:
+    with st.spinner("Đang phân loại..."):
+        if auto_fix:
+            st.session_state["run"] = classify_with_fix(models, image, use_tiles, threshold, w_flat, min_conf)
+        else:
+            st.session_state["run"] = (classify(models, image, use_tiles, threshold, w_flat), None, None)
+    st.session_state["run_key"] = run_key
+r1, r2, fixed = st.session_state["run"]
 final = r2 if r2 is not None else r1
 
 
@@ -103,9 +108,13 @@ with col_img:
         st.image(_im, caption="Tile đã chấm (xanh: vùng cao nhất, cam: vùng cao thứ hai)", use_container_width=True)
     if fixed is not None:
         st.image(fixed, caption=f"Ảnh đã sửa chiều ({r1['orientation']} → thẳng)", use_container_width=True)
-    if r1.get("grid") is not None and r1["is_sino"]:
-        with st.expander("heatmap nhánh chữ (toàn khung)"):
-            g = r1["grid"]; g8 = (np.clip(g, 0, 1) * 255).astype(np.uint8)
+    if r1.get("grid") is not None:
+        g = r1["grid"]
+        heat_alpha = st.slider("Độ đậm heatmap", 0.0, 1.0, 0.55, 0.05, key="heat_alpha")
+        st.image(heatmap_overlay(image, g, heat_alpha), use_container_width=True,
+                 caption=f"Heatmap nhánh chữ trên ảnh gốc · xanh = không có chữ, đỏ = chắc chắn có chữ Hán Nôm · ô cao nhất {g.max():.2f}")
+        with st.expander("lưới 24×24 gốc (trắng đen)"):
+            g8 = (np.clip(g, 0, 1) * 255).astype(np.uint8)
             st.image(Image.fromarray(g8).resize((240, 240), Image.NEAREST), caption="24×24 ô · sáng = có chữ Hán Nôm", width=240)
 
 with col_res:
