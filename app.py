@@ -24,7 +24,7 @@ models = get_models()
 
 with st.sidebar:
     st.header("Model")
-    labels = {"text": "Nhánh chữ Hán Nôm (tầng 1)", "flat": "EfficientNet-B4 flat 6 lớp", "dhc": "EfficientNet-B4 hierarchical (DHC rotswap)", "orient": "PP-LCNet chiều ảnh 5 lớp"}
+    labels = {"text": "Nhánh chữ Hán Nôm (tầng 1)", "flat": "EfficientNet-B4 flat 5 lớp (xoay đổi nhãn)", "dhc": "EfficientNet-B4 DHC 2 tầng (Kaggle, xoay đổi nhãn)", "orient": "PP-LCNet chiều ảnh 5 lớp"}
     for key, p in CKPTS.items():
         st.markdown(f"{'✅' if key in models else '❌'} **{labels[key]}**"); st.caption(p.name)
     st.divider(); st.header("Tuỳ chọn")

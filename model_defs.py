@@ -15,9 +15,9 @@ from pplcnet_torch import PPLCNetDocOrientation
 
 MODELS_DIR = Path(__file__).resolve().parent / "models"
 CKPTS = {
-    "text":   MODELS_DIR / "text_branch_r6.pth",       # nhánh chữ vòng 6
-    "flat":   MODELS_DIR / "flat_b4_6cls.pth",         # flat 6 lớp (SERVICE6), warm start từ flat 8 nhãn, 24/09/2026
-    "dhc":    MODELS_DIR / "dhc_b4_rotswap.pth",       # hierarchical 2/4/2, fine-tune xoay đổi nhãn (giống service)
+    "text":   MODELS_DIR / "text_branch_r7.pth",       # nhánh chữ vòng 7 (26/09/2026, nhận trang xoay 90/270)
+    "flat":   MODELS_DIR / "flat_b4_5cls.pth",         # flat 5 lớp [admin, epitaph, scene, ngang, dọc], train theo cặp đổi nhãn khi xoay (26/09/2026)
+    "dhc":    MODELS_DIR / "dhc_b4_2tang.pth",         # DHC 2 tầng [loại tài liệu, hướng chữ], train Kaggle theo cặp đổi nhãn khi xoay (giống service)
     "orient": MODELS_DIR / "orient5_pplcnet.pth",      # chiều ảnh 5 lớp
 }
 TEXT_THRESHOLD = 0.50      # ngưỡng tầng 1 (đo với tile trên test_full: tầng 1 96.2%, sót 4/1162, nhận nhầm 45/116)
@@ -52,6 +52,17 @@ class HierarchicalEfficientNetB4(nn.Module):
     def forward(self, x):
         f = torch.flatten(self.avgpool(self.features(x)), 1); h1 = self.h1_layer(f); h2 = self.h2_layer(torch.cat([f, h1], 1)); h3 = self.h3_layer(torch.cat([f, h1, h2], 1))
         return [self.classifier1(h1), self.classifier2(h2), self.classifier3(h3)]
+
+class HierarchicalEfficientNetB4V2(nn.Module):
+    """DHC 2 tầng (26/09/2026): h1/classifier1 = loại tài liệu [general, admin, scene, epitaph]; h2/classifier2 = hướng chữ [vertical, horizontal]."""
+    def __init__(self, num_classes=(4, 2)):
+        super().__init__(); base = efficientnet_b4(weights=None); self.features = base.features; self.avgpool = nn.AdaptiveAvgPool2d((1, 1)); d = base.classifier[1].in_features
+        self.h1_layer = nn.Sequential(nn.Linear(d, 256), nn.BatchNorm1d(256), nn.ReLU(inplace=True), nn.Dropout(0.4))
+        self.h2_layer = nn.Sequential(nn.Linear(d + 256, 128), nn.BatchNorm1d(128), nn.ReLU(inplace=True), nn.Dropout(0.3))
+        self.classifier1 = nn.Linear(256, num_classes[0]); self.classifier2 = nn.Linear(128, num_classes[1])
+    def forward(self, x):
+        f = torch.flatten(self.avgpool(self.features(x)), 1); h1 = self.h1_layer(f); h2 = self.h2_layer(torch.cat([f, h1], 1))
+        return [self.classifier1(h1), self.classifier2(h2)]
 
 def build_flat(num_classes):
     m = efficientnet_b4(weights=None); m.classifier = nn.Sequential(nn.Dropout(0.4), nn.Linear(1792, num_classes)); return m
@@ -106,11 +117,13 @@ def load_models():
     p = CKPTS["flat"]
     if p.exists():
         sd = torch.load(p, map_location="cpu", weights_only=False); sd = sd.get("model_state_dict", sd) if isinstance(sd, dict) else sd
-        n = int(sd["classifier.1.weight"].shape[0])   # 6 lớp (SERVICE6) hoặc 8 nhãn con (FLAT8_CLASSES)
+        n = int(sd["classifier.1.weight"].shape[0])   # 5 lớp (FLAT5), 6 lớp (SERVICE6) hoặc 8 nhãn con (FLAT8_CLASSES)
         m = build_flat(n); m.load_state_dict(sd); m.num_classes = n; models["flat"] = m.eval().to(DEVICE)
     p = CKPTS["dhc"]
     if p.exists():
-        m = HierarchicalEfficientNetB4(); ck = torch.load(p, map_location="cpu", weights_only=False); m.load_state_dict(ck["model_state_dict"] if "model_state_dict" in ck else ck); models["dhc"] = m.eval().to(DEVICE)
+        ck = torch.load(p, map_location="cpu", weights_only=False); sd = ck["model_state_dict"] if "model_state_dict" in ck else ck
+        m = HierarchicalEfficientNetB4() if "classifier3.weight" in sd else HierarchicalEfficientNetB4V2()   # DHC 3 tầng cũ hoặc 2 tầng mới
+        m.load_state_dict(sd); models["dhc"] = m.eval().to(DEVICE)
     p = CKPTS["orient"]
     if p.exists():
         ck = torch.load(p, map_location="cpu", weights_only=False); m = PPLCNetDocOrientation(3, ck.get("scale", 1.0), 5); m.load_state_dict(ck["state_dict"]); models["orient"] = m.eval().to(DEVICE)
@@ -177,9 +190,16 @@ def _flat_to_hier(p6):
     s1 = np.array([1.0 - p6[0], p6[0]]); s2 = np.array([p6[4] + p6[5], p6[1], p6[3], p6[2]]); s2 = s2 / max(1e-9, s2.sum())
     s3 = np.array([p6[5], p6[4]]); s3 = s3 / max(1e-9, s3.sum()); return s1, s2, s3
 
+def _flat5_to_hier(p5):
+    """Flat 5 lớp [admin, epitaph, scene, horizontal, vertical] -> (s1 giả, s2, s3) cùng định dạng flat 6 lớp."""
+    p5 = np.clip(p5 - 0.05 / 5, 0.0, None); p5 = p5 / max(1e-9, p5.sum())
+    s2 = np.array([p5[3] + p5[4], p5[0], p5[2], p5[1]]); s2 = s2 / max(1e-9, s2.sum())
+    s3 = np.array([p5[4], p5[3]]); s3 = s3 / max(1e-9, s3.sum()); return np.array([1.0, 0.0]), s2, s3
+
 @torch.no_grad()
 def predict_flat(model, image_rgb):
     p = torch.softmax(model(FLAT_TFM(image_rgb).unsqueeze(0).to(DEVICE)), 1)[0].cpu().numpy()
+    if p.shape[0] == 5: return _flat5_to_hier(p), None  # flat 5 lớp (26/09/2026)
     if p.shape[0] == 6: return _flat_to_hier(p), None   # flat 6 lớp: không có nhãn con scene
     p6 = np.zeros(6)
     for k, j in enumerate(MAP8): p6[j] += float(p[k])
@@ -188,7 +208,8 @@ def predict_flat(model, image_rgb):
 @torch.no_grad()
 def predict_dhc(model, image_rgb):
     t = IMAGENET_NORM(letterbox_resize(cap_long_side(image_rgb), (380, 380))).unsqueeze(0).to(DEVICE)
-    return tuple(torch.softmax(p, 1)[0].cpu().numpy() for p in model(t))
+    out = tuple(torch.softmax(p, 1)[0].cpu().numpy() for p in model(t))
+    return out if len(out) == 3 else (np.array([1.0, 0.0]),) + out   # DHC 2 tầng: thêm tầng Sino giả để giữ định dạng (s1, s2, s3)
 
 @torch.no_grad()
 def predict_orientation(model, image_rgb):
