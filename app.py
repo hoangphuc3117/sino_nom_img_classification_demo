@@ -35,6 +35,8 @@ with st.sidebar:
     w_flat = st.slider("Trọng số flat ở tầng 2 (DHC = 1 − w)", 0.0, 1.0, W_FLAT_TIER2, 0.1)
     auto_fix = st.toggle("Tự sửa chiều ảnh rồi phân loại lại", value=True)
     min_conf = st.slider("Độ tin chiều tối thiểu để sửa", 0.5, 0.99, ORIENT_MIN_CONF, 0.01)
+    show_passes = st.toggle("Hiện chi tiết lần 1 / lần 2 (khi có sửa chiều ảnh)", value=False,
+                            help="Tắt: chỉ hiện kết quả cuối cùng. Bật: khi ảnh bị xoay/lật và đã được sửa, hiện riêng kết quả lần 1 (ảnh gốc) và lần 2 (ảnh đã xoay thẳng). Chỉ đổi cách hiển thị, không chạy lại model.")
     st.divider()
     st.caption("Đo trên test_full 1278 ảnh (23/09/2026, tile, T=0,50): tầng 1 96,2 %, bỏ sót 4/1162, nhận nhầm 45/116; "
                "tầng 2–3 (tầng 1 đúng) 96,0 %; 6 lớp 92,5 %. Chiều ảnh: val 99,5 %, test 97,7 %. "
@@ -91,11 +93,25 @@ def show_result(r, title):
             if "orientation" not in r: st.markdown("**Chiều ảnh:** — (chỉ chạy cho general)")
             else:
                 ok = r["orientation"] == "0"
-                st.markdown(f"**Chiều ảnh:** {'thẳng' if ok else r['orientation']} — {100*r['orient_conf']:.1f}%"); st.progress(min(1.0, r["orient_conf"]))
+                fixed_note = " → đã xoay thẳng" if (not ok and r["orient_conf"] >= min_conf and auto_fix) else ""
+                st.markdown(f"**Chiều ảnh:** {'thẳng' if ok else r['orientation']}{fixed_note} — {100*r['orient_conf']:.1f}%"); st.progress(min(1.0, r["orient_conf"]))
                 with st.expander("phân bố"):
                     for n, v in zip(ORIENT_CLASSES, r["orient_probs"]): st.caption(f"{n}: {100*v:.1f}%")
         with st.expander("thời gian từng bước"):
             for k, v in r["times"].items(): st.caption(f"{k}: {v*1000:.0f} ms")
+
+
+def final_view(r1, r2):
+    """Kết quả cuối để hiển thị gộp: tầng 2-3 lấy theo lần 2 (ảnh đã xoay thẳng), chiều ảnh lấy theo ảnh GỐC (lần 1),
+    thời gian = tổng hai lần."""
+    r = dict(r2)
+    for k in ("orientation", "orient_conf", "orient_probs"):
+        if k in r1: r[k] = r1[k]
+        else: r.pop(k, None)
+    r["times"] = {**{f"lần 1 · {k}": v for k, v in r1["times"].items() if k != "tổng"},
+                  **{f"lần 2 · {k}": v for k, v in r2["times"].items() if k != "tổng"}}
+    r["times"]["tổng"] = r1["times"]["tổng"] + r2["times"]["tổng"]
+    return r
 
 
 col_img, col_res = st.columns([1, 2], gap="large")
@@ -118,10 +134,13 @@ with col_img:
             st.image(Image.fromarray(g8).resize((240, 240), Image.NEAREST), caption="24×24 ô · sáng = có chữ Hán Nôm", width=240)
 
 with col_res:
-    if r2 is not None:
+    if r2 is not None and show_passes:
         st.info(f"Ảnh bị **{r1['orientation']}** (độ tin {r1['orient_conf']:.2f}) → đã xoay/lật về thẳng và phân loại lại. Kết quả cuối lấy theo lần 2.")
         show_result(r2, "⭐ Kết quả sau khi sửa chiều (lần 2)")
         show_result(r1, "Lần 1 (ảnh gốc)")
+    elif r2 is not None:
+        st.info(f"Ảnh bị **{r1['orientation']}** (độ tin {r1['orient_conf']:.2f}) → đã xoay/lật về thẳng trước khi phân loại.")
+        show_result(final_view(r1, r2), "⭐ Kết quả")
     else:
         show_result(r1, "⭐ Kết quả")
         if r1.get("orientation", "0") != "0":
