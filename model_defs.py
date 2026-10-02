@@ -15,12 +15,12 @@ from pplcnet_torch import PPLCNetDocOrientation
 
 MODELS_DIR = Path(__file__).resolve().parent / "models"
 CKPTS = {
-    "text":   MODELS_DIR / "text_branch_r7.pth",       # nhánh chữ vòng 7 (26/09/2026, nhận trang xoay 90/270)
+    "text":   MODELS_DIR / "text_branch_r21.pth",      # nhánh chữ vòng 21 (02/10/2026: nhãn ô mới, xếp hạng vị trí, mô phỏng tile) — như service; bản trước: text_branch_r7.pth
     "flat":   MODELS_DIR / "flat_b4_5cls.pth",         # flat 5 lớp [admin, epitaph, scene, ngang, dọc], train theo cặp đổi nhãn khi xoay (26/09/2026)
     "dhc":    MODELS_DIR / "dhc_b4_2tang.pth",         # DHC 2 tầng [loại tài liệu, hướng chữ], train Kaggle theo cặp đổi nhãn khi xoay (giống service)
     "orient": MODELS_DIR / "orient5_pplcnet.pth",      # chiều ảnh 5 lớp
 }
-TEXT_THRESHOLD = 0.50      # ngưỡng tầng 1 (đo với tile trên test_full: tầng 1 96.2%, sót 4/1162, nhận nhầm 45/116)
+TEXT_THRESHOLD = 0.60      # ngưỡng tầng 1 cho r21 (02/10/2026, như service): sót 4/1162, nhận nhầm 21/116 test + 76 ở tập giữ riêng; 6 lớp 93.11% (r7 @0.50: sót 3, nhầm 36/116, 6 lớp 92.02%)
 ORIENT_MIN_CONF = 0.80     # chỉ sửa ảnh khi độ tin chiều ≥ ngưỡng
 W_FLAT_TIER2 = 0.5         # trọng số flat ở tầng 2 (0.5 = giống service đang chạy)
 
@@ -148,6 +148,10 @@ def tile_box_at(image, cell, G=24, frac=0.56):
     w, h = image.size; iy, ix = cell; cx, cy = (ix + 0.5) / G * w, (iy + 0.5) / G * h; tw, th = int(w * frac), int(h * frac)
     x0 = int(min(max(cx - tw / 2, 0), w - tw)); y0 = int(min(max(cy - th / 2, 0), h - th)); return (x0, y0, x0 + tw, y0 + th)
 
+def service_tile_frac(size, frac=0.56):
+    """02/10/2026 (như service _tile_box): ảnh lớn -> tile ~1400 px ảnh gốc (35–56% cạnh) để chữ nhỏ không bị thu quá nhỏ; ảnh ≤ 2500 px giữ 56%."""
+    return float(np.clip(1400 / max(size), 0.35, frac))
+
 @torch.no_grad()
 def text_score(model, image_rgb, tiles="cascade", threshold=None):
     if str(tiles) == "cascade":   # toàn khung; chỉ khi ≤ ngưỡng mới chấm 2 tile tại 2 vùng điểm cao nhất cách xa nhau
@@ -155,7 +159,7 @@ def text_score(model, image_rgb, tiles="cascade", threshold=None):
         s0 = torch.sigmoid(model(TEXT_TFM(image_rgb).unsqueeze(0).to(DEVICE)))[0].cpu().numpy()
         if s0.max() > thr:
             text_score.last_box = None; return float(s0.max()), np.array([s0.max()]), s0
-        c1, c2 = top2_cells(s0); bs = [tile_box_at(image_rgb, c1)] + ([tile_box_at(image_rgb, c2)] if c2 is not None else [])
+        fr = service_tile_frac(image_rgb.size); c1, c2 = top2_cells(s0); bs = [tile_box_at(image_rgb, c1, frac=fr)] + ([tile_box_at(image_rgb, c2, frac=fr)] if c2 is not None else [])
         x = torch.stack([TEXT_TFM(image_rgb.crop(b)) for b in bs]).to(DEVICE); st = torch.sigmoid(model(x)).flatten(1).max(1).values.cpu().numpy()
         per_view = np.concatenate([[s0.max()], st]); text_score.last_box = bs
         return float(per_view.max()), per_view, s0

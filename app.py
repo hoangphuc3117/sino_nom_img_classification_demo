@@ -30,7 +30,7 @@ with st.sidebar:
     st.divider(); st.header("Tuỳ chọn")
     from model_defs import TILE_MODES
     use_tiles = st.radio("Tầng 1: số khung đưa vào nhánh chữ", options=list(TILE_MODES), index=0, format_func=lambda k: TILE_MODES[k],
-                         help="Bậc thang: ~90% ảnh chỉ chạy toàn khung (≈0,55 s); ảnh chưa đạt ngưỡng mới chấm thêm 2 tile (≈+1 s). Test: T=0,5 sót 4, nhầm 34.")
+                         help="Bậc thang: phần lớn ảnh có Hán chỉ chạy toàn khung; ảnh chưa đạt ngưỡng mới chấm thêm 2 tile (ảnh lớn: tile ~1400 px ảnh gốc). r21, T=0,60: sót 4/1162, nhầm 21/116.")
     threshold = st.slider("Ngưỡng tầng 1 (điểm nhánh chữ)", 0.10, 0.90, TEXT_THRESHOLD, 0.05)
     w_flat = st.slider("Trọng số flat ở tầng 2 (DHC = 1 − w)", 0.0, 1.0, W_FLAT_TIER2, 0.1)
     auto_fix = st.toggle("Tự sửa chiều ảnh rồi phân loại lại", value=True)
@@ -38,9 +38,9 @@ with st.sidebar:
     show_passes = st.toggle("Hiện chi tiết lần 1 / lần 2 (khi có sửa chiều ảnh)", value=False,
                             help="Tắt: chỉ hiện kết quả cuối cùng. Bật: khi ảnh bị xoay/lật và đã được sửa, hiện riêng kết quả lần 1 (ảnh gốc) và lần 2 (ảnh đã xoay thẳng). Chỉ đổi cách hiển thị, không chạy lại model.")
     st.divider()
-    st.caption("Đo trên test_full 1278 ảnh (23/09/2026, tile, T=0,50): tầng 1 96,2 %, bỏ sót 4/1162, nhận nhầm 45/116; "
-               "tầng 2–3 (tầng 1 đúng) 96,0 %; 6 lớp 92,5 %. Chiều ảnh: val 99,5 %, test 97,7 %. "
-               "CPU M4 Pro: ≈2,3 s/ảnh có tile, ≈0,9 s không tile, chiều ảnh +0,05 s.")
+    st.caption("Tầng 1 = nhánh chữ vòng 21, T=0,60, tile theo điểm ảnh gốc (02/10/2026, như service). Đo luồng service trên CPU: test_full 1278 ảnh — bỏ sót 4/1162, nhận nhầm 21/116; "
+               "tập giữ riêng chữ Việt / hoa văn / văn bản không Hán: nhầm 76/266 (r7: 117); 6 lớp 93,1 % (r7: 92,0 %). Chiều ảnh: val 99,5 %, test 97,7 %. "
+               "Thời gian service (CPU 4 luồng): trung vị 0,64 s/ảnh, p95 1,2 s.")
 
 missing = [k for k in ("text", "flat", "dhc") if k not in models]
 if missing:
