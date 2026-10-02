@@ -14,11 +14,20 @@ from PIL import Image, ImageOps
 from pplcnet_torch import PPLCNetDocOrientation
 
 MODELS_DIR = Path(__file__).resolve().parent / "models"
+
+def resolve_checkpoint(primary_name, *aliases):
+    """Return the first existing checkpoint among a preferred filename list."""
+    candidates = [MODELS_DIR / primary_name] + [MODELS_DIR / alias for alias in aliases]
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
+
 CKPTS = {
-    "text":   MODELS_DIR / "text_branch_r21.pth",      # nhánh chữ vòng 21 (02/10/2026: nhãn ô mới, xếp hạng vị trí, mô phỏng tile) — như service; bản trước: text_branch_r7.pth
-    "flat":   MODELS_DIR / "flat_b4_5cls.pth",         # flat 5 lớp [admin, epitaph, scene, ngang, dọc], train theo cặp đổi nhãn khi xoay (26/09/2026)
-    "dhc":    MODELS_DIR / "dhc_b4_2tang.pth",         # DHC 2 tầng [loại tài liệu, hướng chữ], train Kaggle theo cặp đổi nhãn khi xoay (giống service)
-    "orient": MODELS_DIR / "orient5_pplcnet.pth",      # chiều ảnh 5 lớp
+    "text":   resolve_checkpoint("text_branch_r21.pth", "text_branch_r7.pth"),
+    "flat":   resolve_checkpoint("flat_b4_5cls.pth"),
+    "dhc":    resolve_checkpoint("dhc_b4_2tang.pth"),
+    "orient": resolve_checkpoint("orient5_pplcnet.pth"),
 }
 TEXT_THRESHOLD = 0.60      # ngưỡng tầng 1 cho r21 (02/10/2026, như service): sót 4/1162, nhận nhầm 21/116 test + 76 ở tập giữ riêng; 6 lớp 93.11% (r7 @0.50: sót 3, nhầm 36/116, 6 lớp 92.02%)
 ORIENT_MIN_CONF = 0.80     # chỉ sửa ảnh khi độ tin chiều ≥ ngưỡng
