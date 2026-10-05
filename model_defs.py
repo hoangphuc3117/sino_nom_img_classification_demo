@@ -1,7 +1,7 @@
 """Định nghĩa model + pipeline cho web demo (bản 24/09/2026, dùng bộ models_best):
   Tầng 1  nhánh chữ Hán Nôm (EfficientNet-B4, lưới 24×24 @768, toàn khung + 4 tile) — điểm > T (0.50) → có Hán Nôm.
   Tầng 2  4 nhóm = trung bình 0.5/0.5 của DHC rotswap (đầu tầng 2) và flat 6 lớp (khử label smoothing) — y logic service hn_classification v3.
-  Tầng 3  dọc/ngang chỉ khi nhóm = general: một model nói dọc → lấy vector model đó (OR-dọc).
+  Tầng 3  dọc/ngang chỉ khi nhóm = general: trung bình 2 model; DHC nói dọc với P > 0.95 thì lấy vector DHC (luật lai, 05/10/2026; trước đó OR-dọc).
   Chiều   PP-LCNet 5 lớp (0/90/180/270/mirror) chỉ cho general; nếu lệch và tin ≥ 0.8 → sửa ảnh, phân loại lại (luồng đã áp dụng ở hn_classification).
 Tách khỏi app.py để test được không cần Streamlit."""
 import os, time
@@ -14,20 +14,11 @@ from PIL import Image, ImageOps
 from pplcnet_torch import PPLCNetDocOrientation
 
 MODELS_DIR = Path(__file__).resolve().parent / "models"
-
-def resolve_checkpoint(primary_name, *aliases):
-    """Return the first existing checkpoint among a preferred filename list."""
-    candidates = [MODELS_DIR / primary_name] + [MODELS_DIR / alias for alias in aliases]
-    for path in candidates:
-        if path.exists():
-            return path
-    return candidates[0]
-
 CKPTS = {
-    "text":   resolve_checkpoint("text_branch_r21.pth", "text_branch_r7.pth"),
-    "flat":   resolve_checkpoint("flat_b4_5cls.pth"),
-    "dhc":    resolve_checkpoint("dhc_b4_2tang.pth"),
-    "orient": resolve_checkpoint("orient5_pplcnet.pth"),
+    "text":   MODELS_DIR / "text_branch_r21.pth",      # nhánh chữ vòng 21 (02/10/2026: nhãn ô mới, xếp hạng vị trí, mô phỏng tile) — như service; bản trước: text_branch_r7.pth
+    "flat":   MODELS_DIR / "flat_b4_5cls.pth",         # flat 5 lớp [admin, epitaph, scene, ngang, dọc]; 05/10/2026: fine-tune chống nhầm văn bia (outputs/finetune_tier2_bia/flat_ft.pth = flat_ep1), gốc 26/09 ở backups/tier2_20261005_truoc_finetune_bia
+    "dhc":    MODELS_DIR / "dhc_b4_2tang.pth",         # DHC 2 tầng [loại tài liệu, hướng chữ]; 05/10/2026: fine-tune chống nhầm văn bia (outputs/finetune_tier2_bia/dhc_ft.pth = dhc_ep3), gốc 26/09 ở backups/...
+    "orient": MODELS_DIR / "orient5_pplcnet.pth",      # chiều ảnh 5 lớp
 }
 TEXT_THRESHOLD = 0.60      # ngưỡng tầng 1 cho r21 (02/10/2026, như service): sót 4/1162, nhận nhầm 21/116 test + 76 ở tập giữ riêng; 6 lớp 93.11% (r7 @0.50: sót 3, nhầm 36/116, 6 lớp 92.02%)
 ORIENT_MIN_CONF = 0.80     # chỉ sửa ảnh khi độ tin chiều ≥ ngưỡng
@@ -229,11 +220,16 @@ def predict_orientation(model, image_rgb):
     p = torch.softmax(model(ORIENT_TFM(image_rgb).unsqueeze(0).to(DEVICE)), 1)[0].cpu().numpy(); i = int(p.argmax())
     return ORIENT_CLASSES[i], float(p[i]), p
 
-def ensemble_23(hier_probs, flat_probs, w_flat=W_FLAT_TIER2):
-    """Tầng 2 trung bình có trọng số; tầng 3 OR-dọc — y logic service đang chạy."""
+DIRECTION_DHC_OVERRIDE = 0.95   # tầng 3: DHC nói dọc với P(dọc) > ngưỡng này thì lấy dọc theo DHC, còn lại trung bình 2 model
+# Đo 05/10/2026 trên nhóm thông thường test_full (451 dọc, 37 ngang) với weights fine-tune: OR-dọc 450/34, trung bình 449/36,
+# luật lai 450/36 (6 lớp toàn test_full 93.51 % -> 93.58 % -> 93.66 %). Ngưỡng 0.90–0.95 như nhau; >= 0.98 mất lại 1 ảnh dọc (DHC 0.955).
+
+def ensemble_23(hier_probs, flat_probs, w_flat=W_FLAT_TIER2, dhc_override=DIRECTION_DHC_OVERRIDE):
+    """Tầng 2 trung bình có trọng số; tầng 3 luật lai: trung bình, nhưng DHC P(dọc) > dhc_override -> lấy vector DHC.
+    (Trước 05/10/2026: OR-dọc — một model nói dọc thì lấy nguyên vector model đó.)"""
     s2 = w_flat * flat_probs[1] + (1 - w_flat) * hier_probs[1]
-    h3, f3 = hier_probs[2], flat_probs[2]; hv = int(h3.argmax()) == 0; fv = int(f3.argmax()) == 0
-    s3 = np.mean([h3, f3], 0) if (hv and fv) else h3 if hv else f3 if fv else np.mean([h3, f3], 0)
+    h3, f3 = hier_probs[2], flat_probs[2]
+    s3 = np.array(h3, dtype=float) if float(h3[0]) > dhc_override else np.mean([h3, f3], 0)
     return s2, s3
 
 def classify(models, image, tiles="cascade", threshold=TEXT_THRESHOLD, w_flat=W_FLAT_TIER2, reuse_tier1=None):
