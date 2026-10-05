@@ -1,7 +1,8 @@
 """Định nghĩa model + pipeline cho web demo (bản 24/09/2026, dùng bộ models_best):
   Tầng 1  nhánh chữ Hán Nôm (EfficientNet-B4, lưới 24×24 @768, toàn khung + 4 tile) — điểm > T (0.50) → có Hán Nôm.
   Tầng 2  4 nhóm = trung bình 0.5/0.5 của DHC rotswap (đầu tầng 2) và flat 6 lớp (khử label smoothing) — y logic service hn_classification v3.
-  Tầng 3  dọc/ngang chỉ khi nhóm = general: trung bình 2 model; DHC nói dọc với P > 0.95 thì lấy vector DHC (luật lai, 05/10/2026; trước đó OR-dọc).
+  Tầng 3  dọc/ngang chỉ khi nhóm = general (05/10/2026): DHC chạy thêm trên ảnh xoay 90°, P(dọc) = (gốc + ngang-xoay)/2 (kiểm tra nhất quán);
+          rồi luật lai: DHC P(dọc) > 0.95 thì lấy vector DHC, còn lại trung bình 2 model. Trước đó: OR-dọc.
   Chiều   PP-LCNet 5 lớp (0/90/180/270/mirror) chỉ cho general; nếu lệch và tin ≥ 0.8 → sửa ảnh, phân loại lại (luồng đã áp dụng ở hn_classification).
 Tách khỏi app.py để test được không cần Streamlit."""
 import os, time
@@ -224,12 +225,19 @@ DIRECTION_DHC_OVERRIDE = 0.95   # tầng 3: DHC nói dọc với P(dọc) > ngư
 # Đo 05/10/2026 trên nhóm thông thường test_full (451 dọc, 37 ngang) với weights fine-tune: OR-dọc 450/34, trung bình 449/36,
 # luật lai 450/36 (6 lớp toàn test_full 93.51 % -> 93.58 % -> 93.66 %). Ngưỡng 0.90–0.95 như nhau; >= 0.98 mất lại 1 ảnh dọc (DHC 0.955).
 
-def ensemble_23(hier_probs, flat_probs, w_flat=W_FLAT_TIER2, dhc_override=DIRECTION_DHC_OVERRIDE):
-    """Tầng 2 trung bình có trọng số; tầng 3 luật lai: trung bình, nhưng DHC P(dọc) > dhc_override -> lấy vector DHC.
-    (Trước 05/10/2026: OR-dọc — một model nói dọc thì lấy nguyên vector model đó.)"""
+DIRECTION_TTA_ROT90 = True      # tầng 3: chạy thêm DHC trên ảnh xoay 90°; P(dọc) DHC = (P(dọc) gốc + P(ngang) xoay)/2 rồi mới áp luật lai.
+# DHC không đổi dọc<->ngang khi xoay (vd. thơ chữ đỏ trên đá: 0.98 ở 0°, 1.00 ở 90°) -> về ~0.5, mất quyền ưu tiên, flat kéo lại.
+# Đo nhóm thông thường test_full: vẫn 450/451 dọc, 36/37 ngang. Thêm ~60–100 ms CPU, chỉ khi nhóm = general.
+
+def ensemble_23(hier_probs, flat_probs, w_flat=W_FLAT_TIER2, dhc_override=DIRECTION_DHC_OVERRIDE, hier_dir_rot90=None):
+    """Tầng 2 trung bình có trọng số; tầng 3: (tuỳ chọn) kiểm tra nhất quán xoay 90° cho DHC, rồi luật lai:
+    DHC P(dọc) > dhc_override -> lấy vector DHC, còn lại trung bình với flat. (Trước 05/10/2026: OR-dọc.)
+    hier_dir_rot90: vector [dọc, ngang] của DHC trên ảnh xoay 90° (None = không dùng)."""
     s2 = w_flat * flat_probs[1] + (1 - w_flat) * hier_probs[1]
-    h3, f3 = hier_probs[2], flat_probs[2]
-    s3 = np.array(h3, dtype=float) if float(h3[0]) > dhc_override else np.mean([h3, f3], 0)
+    h3, f3 = np.array(hier_probs[2], dtype=float), flat_probs[2]
+    if hier_dir_rot90 is not None:
+        p_v = 0.5 * (float(h3[0]) + float(hier_dir_rot90[1])); h3 = np.array([p_v, 1.0 - p_v])
+    s3 = h3 if float(h3[0]) > dhc_override else np.mean([h3, f3], 0)
     return s2, s3
 
 def classify(models, image, tiles="cascade", threshold=TEXT_THRESHOLD, w_flat=W_FLAT_TIER2, reuse_tier1=None):
@@ -245,7 +253,11 @@ def classify(models, image, tiles="cascade", threshold=TEXT_THRESHOLD, w_flat=W_
         r["final"] = "NonSinoNom"; r["times"]["tổng"] = sum(r["times"].values()); return r
     t0 = time.perf_counter(); flat_h, p8 = predict_flat(models["flat"], img); r["times"]["flat B4 @380"] = time.perf_counter() - t0
     t0 = time.perf_counter(); dhc_h = predict_dhc(models["dhc"], img); r["times"]["DHC B4 @380"] = time.perf_counter() - t0
-    s2, s3 = ensemble_23(dhc_h, flat_h, w_flat); i2 = int(s2.argmax()); i3 = int(s3.argmax())
+    s2, s3 = ensemble_23(dhc_h, flat_h, w_flat); i2 = int(s2.argmax())
+    if i2 == 0 and DIRECTION_TTA_ROT90:  # general: kiểm tra nhất quán hướng bằng DHC trên ảnh xoay 90°
+        t0 = time.perf_counter(); dhc90 = predict_dhc(models["dhc"], img.rotate(90, expand=True)); r["times"]["DHC xoay 90° (nhất quán hướng)"] = time.perf_counter() - t0
+        s2, s3 = ensemble_23(dhc_h, flat_h, w_flat, hier_dir_rot90=dhc90[2]); r["dhc_rot90"] = dhc90
+    i3 = int(s3.argmax())
     r.update(flat=flat_h, flat_p8=p8, dhc=dhc_h, s2=s2, s3=s3, doc_type=L2_NAMES[i2], doc_conf=float(s2[i2]))
     r["final"] = L2_NAMES[i2]
     if i2 == 2 and p8 is not None:  # scene → nhãn con theo flat (chỉ flat 8 nhãn)

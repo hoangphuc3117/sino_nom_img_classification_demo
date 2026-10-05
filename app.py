@@ -88,7 +88,7 @@ def show_result(r, title):
             if "direction" not in r: st.markdown("**Tầng 3:** —")
             else:
                 st.markdown(f"**Tầng 3:** {r['direction']} — {100*r['dir_conf']:.1f}%"); st.progress(min(1.0, r["dir_conf"]))
-                with st.expander("P(dọc) từng model"): st.caption(f"DHC {r['dhc'][2][0]:.2f} · flat {r['flat'][2][0]:.2f} · quy tắc: trung bình, DHC > 0.95 thì lấy DHC")
+                with st.expander("P(dọc) từng model"): st.caption(f"DHC {r['dhc'][2][0]:.2f}" + (f" (xoay 90°: {r['dhc_rot90'][2][0]:.2f} → nhất quán {0.5*(r['dhc'][2][0] + r['dhc_rot90'][2][1]):.2f})" if "dhc_rot90" in r else "") + f" · flat {r['flat'][2][0]:.2f} · quy tắc: DHC kiểm tra xoay 90°, > 0.95 thì lấy DHC, còn lại trung bình")
         with c4:
             if "orientation" not in r: st.markdown("**Chiều ảnh:** — (chỉ chạy cho general)")
             else:
