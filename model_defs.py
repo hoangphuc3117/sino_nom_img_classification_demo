@@ -21,7 +21,7 @@ CKPTS = {
     "dhc":    MODELS_DIR / "dhc_b4_2tang.pth",         # DHC 2 tầng [loại tài liệu, hướng chữ]; 05/10/2026: fine-tune chống nhầm văn bia (outputs/finetune_tier2_bia/dhc_ft.pth = dhc_ep3), gốc 26/09 ở backups/...
     "orient": MODELS_DIR / "orient5_pplcnet.pth",      # chiều ảnh 5 lớp
 }
-TEXT_THRESHOLD = 0.60      # ngưỡng tầng 1 cho r21 (02/10/2026, như service): sót 4/1162, nhận nhầm 21/116 test + 76 ở tập giữ riêng; 6 lớp 93.11% (r7 @0.50: sót 3, nhầm 36/116, 6 lớp 92.02%)
+TEXT_THRESHOLD = 0.5      # ngưỡng tầng 1 cho r21 (02/10/2026, như service): sót 4/1162, nhận nhầm 21/116 test + 76 ở tập giữ riêng; 6 lớp 93.11% (r7 @0.50: sót 3, nhầm 36/116, 6 lớp 92.02%)
 ORIENT_MIN_CONF = 0.80     # chỉ sửa ảnh khi độ tin chiều ≥ ngưỡng
 W_FLAT_TIER2 = 0.5         # trọng số flat ở tầng 2 (0.5 = giống service đang chạy)
 
