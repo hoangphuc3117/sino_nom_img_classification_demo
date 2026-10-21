@@ -6,7 +6,7 @@ import streamlit as st
 from PIL import Image
 
 from model_defs import (load_models, classify, classify_with_fix, fix_orientation, normalize_pil_image, heatmap_overlay,
-                        CKPTS, DEVICE, TEXT_THRESHOLD, ORIENT_MIN_CONF, W_FLAT_TIER2,
+                        CKPTS, DEVICE, TEXT_THRESHOLD, TILE_THRESHOLD, ORIENT_MIN_CONF, W_FLAT_TIER2,
                         L1_NAMES, L2_NAMES, L3_NAMES, ORIENT_CLASSES, FLAT8_CLASSES)
 
 st.set_page_config(page_title="Hán Nôm Classifier", page_icon="🏮", layout="wide")
@@ -30,17 +30,19 @@ with st.sidebar:
     st.divider(); st.header("Tuỳ chọn")
     from model_defs import TILE_MODES
     use_tiles = st.radio("Tầng 1: số khung đưa vào nhánh chữ", options=list(TILE_MODES), index=0, format_func=lambda k: TILE_MODES[k],
-                         help="Bậc thang: phần lớn ảnh có Hán chỉ chạy toàn khung; ảnh chưa đạt ngưỡng mới chấm thêm 2 tile (ảnh lớn: tile ~1400 px ảnh gốc). r21, T=0,60: sót 4/1162, nhầm 21/116.")
-    threshold = st.slider("Ngưỡng tầng 1 (điểm nhánh chữ)", 0.10, 0.90, TEXT_THRESHOLD, 0.05)
+                         help="Bậc thang: phần lớn ảnh có Hán chỉ chạy toàn khung; ảnh chưa đạt ngưỡng toàn khung mới chấm thêm 2 tile (ảnh lớn: tile ~1400 px ảnh gốc), tile phải vượt ngưỡng tile riêng.")
+    threshold = st.slider("Ngưỡng tầng 1 — toàn khung", 0.10, 0.995, TEXT_THRESHOLD, 0.005,
+                          help="r24 ep10: 0,70/0,70 (mặc định) = sót test 8/1160, nhầm 12/116, câu đối Việt 19/187; 0,60/0,60 = sót 6, nhầm 13; 0,825/0,975 = recall val 99 % (sót 16, nhầm 4/116, câu đối Việt 13/187); 0,975/0,975 = sót 20, nhầm 3.")
+    tile_threshold = st.slider("Ngưỡng tầng 1 — tile", 0.10, 0.995, TILE_THRESHOLD, 0.005)
     w_flat = st.slider("Trọng số flat ở tầng 2 (DHC = 1 − w)", 0.0, 1.0, W_FLAT_TIER2, 0.1)
     auto_fix = st.toggle("Tự sửa chiều ảnh rồi phân loại lại", value=True)
     min_conf = st.slider("Độ tin chiều tối thiểu để sửa", 0.5, 0.99, ORIENT_MIN_CONF, 0.01)
     show_passes = st.toggle("Hiện chi tiết lần 1 / lần 2 (khi có sửa chiều ảnh)", value=False,
                             help="Tắt: chỉ hiện kết quả cuối cùng. Bật: khi ảnh bị xoay/lật và đã được sửa, hiện riêng kết quả lần 1 (ảnh gốc) và lần 2 (ảnh đã xoay thẳng). Chỉ đổi cách hiển thị, không chạy lại model.")
     st.divider()
-    st.caption("Tầng 1 = nhánh chữ vòng 21, T=0,60, tile theo điểm ảnh gốc (02/10/2026, như service). Đo luồng service trên CPU: test_full 1278 ảnh — bỏ sót 4/1162, nhận nhầm 21/116; "
-               "tập giữ riêng chữ Việt / hoa văn / văn bản không Hán: nhầm 76/266 (r7: 117); 6 lớp 93,1 % (r7: 92,0 %). Chiều ảnh: val 99,5 %, test 97,7 %. "
-               "Thời gian service (CPU 4 luồng): trung vị 0,64 s/ảnh, p95 1,2 s.")
+    st.caption("Tầng 1 = nhánh chữ vòng 24 ep10 (22/10/2026: train thuần trên nhãn v2, không neo r7), ngưỡng mặc định 0,70 toàn khung / 0,70 tile. "
+               "Test_full: sót 8/1160, nhầm 12/116 (r21 @0,60: sót 4, nhầm 21). Tập giữ riêng @0,70: câu đối Việt 19/187, hoa văn 14/165, non_chu_viet 4/51, âm web 8/422 "
+               "(r21 @0,60: 83 / 45 / 27 / 41). Service hiện vẫn chạy r21, T=0,60. Chiều ảnh: val 99,5 %, test 97,7 %. Thời gian CPU ≈ như r21 (cùng kiến trúc, cùng số khung).")
 
 missing = [k for k in ("text", "flat", "dhc") if k not in models]
 if missing:
@@ -52,13 +54,13 @@ if uploaded is None:
 
 image = Image.open(uploaded)
 # Giữ kết quả theo (ảnh, tham số): kéo thanh độ đậm heatmap không phải chạy lại model
-run_key = (uploaded.name, uploaded.size, hash(uploaded.getvalue()), use_tiles, threshold, w_flat, auto_fix, min_conf)
+run_key = (uploaded.name, uploaded.size, hash(uploaded.getvalue()), use_tiles, threshold, tile_threshold, w_flat, auto_fix, min_conf)
 if st.session_state.get("run_key") != run_key:
     with st.spinner("Đang phân loại..."):
         if auto_fix:
-            st.session_state["run"] = classify_with_fix(models, image, use_tiles, threshold, w_flat, min_conf)
+            st.session_state["run"] = classify_with_fix(models, image, use_tiles, threshold, w_flat, min_conf, tile_threshold=tile_threshold)
         else:
-            st.session_state["run"] = (classify(models, image, use_tiles, threshold, w_flat), None, None)
+            st.session_state["run"] = (classify(models, image, use_tiles, threshold, w_flat, tile_threshold=tile_threshold), None, None)
     st.session_state["run_key"] = run_key
 r1, r2, fixed = st.session_state["run"]
 final = r2 if r2 is not None else r1
@@ -72,7 +74,8 @@ def show_result(r, title):
         with h3: (st.success if r["is_sino"] else st.warning)(f"**{r['final']}**")
         c1, c2, c3, c4 = st.columns(4)
         with c1:
-            st.markdown(f"**Tầng 1:** {'SinoNom' if r['is_sino'] else 'NonSinoNom'} — điểm chữ {r['p_text']:.2f} (ngưỡng {threshold:.2f})")
+            st.markdown(f"**Tầng 1:** {'SinoNom' if r['is_sino'] else 'NonSinoNom'} — toàn khung {r['per_view'][0]:.2f} (ngưỡng {threshold:.3f})"
+                        + (f" · tile {max(r['per_view'][1:]):.2f} (ngưỡng {tile_threshold:.3f})" if len(r['per_view']) > 1 else ""))
             st.progress(min(1.0, r["p_text"]))
             with st.expander("điểm từng khung"):
                 names = ["toàn khung", "tile vùng cao 1", "tile vùng cao 2"] if use_tiles == "cascade" else (["toàn khung", "tile điểm cao nhất" if use_tiles == "1" else "tile giữa"]) if len(r["per_view"]) == 2 else ["toàn khung", "tile trên-trái", "tile trên-phải", "tile dưới-trái", "tile dưới-phải"]

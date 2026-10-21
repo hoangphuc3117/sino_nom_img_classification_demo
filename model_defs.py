@@ -16,12 +16,13 @@ from pplcnet_torch import PPLCNetDocOrientation
 
 MODELS_DIR = Path(__file__).resolve().parent / "models"
 CKPTS = {
-    "text":   MODELS_DIR / "text_branch_r21.pth",      # nhánh chữ vòng 21 (02/10/2026: nhãn ô mới, xếp hạng vị trí, mô phỏng tile) — như service; bản trước: text_branch_r7.pth
+    "text":   MODELS_DIR / "text_branch_r24_ep10.pth", # nhánh chữ vòng 24 ep10 (22/10/2026: train thuần trên nhãn v2, không thầy r7; outputs/train_scratch_presence_r24/run/ep10.pth). Service vẫn dùng text_branch_r21.pth (bản trước của demo, còn trong models/)
     "flat":   MODELS_DIR / "flat_b4_5cls.pth",         # flat 5 lớp [admin, epitaph, scene, ngang, dọc]; 05/10/2026: fine-tune chống nhầm văn bia (outputs/finetune_tier2_bia/flat_ft.pth = flat_ep1), gốc 26/09 ở backups/tier2_20261005_truoc_finetune_bia
     "dhc":    MODELS_DIR / "dhc_b4_2tang.pth",         # DHC 2 tầng [loại tài liệu, hướng chữ]; 05/10/2026: fine-tune chống nhầm văn bia (outputs/finetune_tier2_bia/dhc_ft.pth = dhc_ep3), gốc 26/09 ở backups/...
     "orient": MODELS_DIR / "orient5_pplcnet.pth",      # chiều ảnh 5 lớp
 }
-TEXT_THRESHOLD = 0.5      # ngưỡng tầng 1 cho r21 (02/10/2026, như service): sót 4/1162, nhận nhầm 21/116 test + 76 ở tập giữ riêng; 6 lớp 93.11% (r7 @0.50: sót 3, nhầm 36/116, 6 lớp 92.02%)
+TEXT_THRESHOLD = 0.70      # ngưỡng TOÀN KHUNG tầng 1 cho r24 ep10 (22/10/2026, người dùng chọn 0,70): sót test 8/1160, nhầm test 12/116; tập giữ riêng: câu đối Việt 19/187, hoa văn 14/165, non_chu_viet 4/51, âm web 8/422
+TILE_THRESHOLD = 0.70      # ngưỡng TILE riêng (bậc thang: toàn khung ≤ TEXT_THRESHOLD mới chấm tile; tile > TILE_THRESHOLD mới tính là có Hán). Điểm khác: 0.60/0.60 → sót test 6, nhầm 13/116; 0.825/0.975 (recall val 99%) → sót 16, nhầm 4/116, câu đối Việt 13/187. r21 cũ @0.60: sót 4, nhầm 21
 ORIENT_MIN_CONF = 0.80     # chỉ sửa ảnh khi độ tin chiều ≥ ngưỡng
 W_FLAT_TIER2 = 0.5         # trọng số flat ở tầng 2 (0.5 = giống service đang chạy)
 
@@ -240,15 +241,17 @@ def ensemble_23(hier_probs, flat_probs, w_flat=W_FLAT_TIER2, dhc_override=DIRECT
     s3 = h3 if float(h3[0]) > dhc_override else np.mean([h3, f3], 0)
     return s2, s3
 
-def classify(models, image, tiles="cascade", threshold=TEXT_THRESHOLD, w_flat=W_FLAT_TIER2, reuse_tier1=None):
+def classify(models, image, tiles="cascade", threshold=TEXT_THRESHOLD, w_flat=W_FLAT_TIER2, reuse_tier1=None, tile_threshold=None):
     """Một lượt phân loại đủ 3 tầng + chiều ảnh. Trả dict có xác suất từng model, kết quả gộp, thời gian từng bước.
-    reuse_tier1: kết quả lượt trước để dùng lại tầng 1 (có/không có Hán Nôm không đổi khi xoay/lật ảnh) → lượt 2 chỉ chạy flat + DHC + chiều."""
-    img = normalize_pil_image(image); r = {"size": img.size, "times": {}}
+    reuse_tier1: kết quả lượt trước để dùng lại tầng 1 (có/không có Hán Nôm không đổi khi xoay/lật ảnh) → lượt 2 chỉ chạy flat + DHC + chiều.
+    tile_threshold (22/10/2026): ngưỡng riêng cho tile; có Hán khi toàn khung > threshold HOẶC một tile > tile_threshold (None = TILE_THRESHOLD)."""
+    img = normalize_pil_image(image); r = {"size": img.size, "times": {}}; t2 = TILE_THRESHOLD if tile_threshold is None else tile_threshold
     if reuse_tier1 is not None:
         r.update(p_text=reuse_tier1["p_text"], per_view=reuse_tier1["per_view"], grid=reuse_tier1["grid"], is_sino=reuse_tier1["is_sino"], tier1_reused=True); r["times"]["tầng 1 (dùng lại lượt 1)"] = 0.0
     else:
         t0 = time.perf_counter(); p_text, per_view, grid = text_score(models["text"], img, tiles, threshold); r["times"]["tầng 1 (nhánh chữ)"] = time.perf_counter() - t0
-        r.update(p_text=p_text, per_view=per_view, grid=grid, is_sino=p_text > threshold, tile_box=getattr(text_score, "last_box", None))
+        is_sino = bool(per_view[0] > threshold) or (len(per_view) > 1 and bool(np.max(per_view[1:]) > t2))   # khung đầu = toàn khung, các khung sau = tile
+        r.update(p_text=p_text, per_view=per_view, grid=grid, is_sino=is_sino, tile_threshold=t2, tile_box=getattr(text_score, "last_box", None))
     if not r["is_sino"]:
         r["final"] = "NonSinoNom"; r["times"]["tổng"] = sum(r["times"].values()); return r
     t0 = time.perf_counter(); flat_h, p8 = predict_flat(models["flat"], img); r["times"]["flat B4 @380"] = time.perf_counter() - t0
@@ -269,11 +272,11 @@ def classify(models, image, tiles="cascade", threshold=TEXT_THRESHOLD, w_flat=W_
             r.update(orientation=ori, orient_conf=conf, orient_probs=pvec)
     r["times"]["tổng"] = sum(r["times"].values()); return r
 
-def classify_with_fix(models, image, tiles="cascade", threshold=TEXT_THRESHOLD, w_flat=W_FLAT_TIER2, min_conf=ORIENT_MIN_CONF):
+def classify_with_fix(models, image, tiles="cascade", threshold=TEXT_THRESHOLD, w_flat=W_FLAT_TIER2, min_conf=ORIENT_MIN_CONF, tile_threshold=None):
     """Luồng đầy đủ: phân loại → nếu general và chiều ≠ 0 với độ tin ≥ min_conf → sửa ảnh → phân loại lại → dùng kết quả lần 2.
     Trả (kết quả lần 1, kết quả lần 2 hoặc None, ảnh đã sửa hoặc None)."""
-    r1 = classify(models, image, tiles, threshold, w_flat)
+    r1 = classify(models, image, tiles, threshold, w_flat, tile_threshold=tile_threshold)
     if r1.get("orientation", "0") != "0" and r1.get("orient_conf", 0.0) >= min_conf:
-        fixed = fix_orientation(normalize_pil_image(image), r1["orientation"]); r2 = classify(models, fixed, tiles, threshold, w_flat, reuse_tier1=r1)
+        fixed = fix_orientation(normalize_pil_image(image), r1["orientation"]); r2 = classify(models, fixed, tiles, threshold, w_flat, reuse_tier1=r1, tile_threshold=tile_threshold)
         return r1, r2, fixed
     return r1, None, None
